@@ -6316,6 +6316,12 @@ class MusicDatabase:
         listening_history_scope). passing one on a shared history is not an
         error and does not silently pretend to filter - the caller reports the
         scope it actually got.
+
+        Rows with no profile_id (every play recorded before a profile could
+        be attributed, plus the default/shared Jellyfin poll and any
+        non-Jellyfin server, which never attribute at all) are unowned, not
+        "someone else's" - they stay visible to every profile's read instead
+        of silently vanishing the moment one profile links an account.
         """
         conn = None
         try:
@@ -6327,7 +6333,7 @@ class MusicDatabase:
             if profile_id is not None:
                 cursor.execute("PRAGMA table_info(listening_history)")
                 if any(r[1] == 'profile_id' for r in cursor.fetchall()):
-                    scope_clause = ' AND profile_id = ?'
+                    scope_clause = ' AND (profile_id = ? OR profile_id IS NULL)'
                     params.append(profile_id)
 
             cursor.execute(f"""

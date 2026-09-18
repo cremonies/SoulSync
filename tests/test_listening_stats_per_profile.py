@@ -182,3 +182,43 @@ class TestPerProfileJellyfinPoll:
         worker._poll()
 
         assert client.calls == ['admin-account']
+
+
+class TestGetTopArtistsProfileScope:
+    """Regression: adding listening_history.profile_id must not make
+    pre-existing, never-attributed plays disappear for the one profile
+    most installs actually have (#bylt empty-generation regression)."""
+
+    def _seed(self, db, artist, plays, profile_id=None):
+        with db._get_connection() as conn:
+            for _ in range(plays):
+                conn.execute(
+                    "INSERT INTO listening_history (title, artist, played_at, profile_id) "
+                    "VALUES ('x', ?, datetime('now'), ?)", (artist, profile_id))
+            conn.commit()
+
+    def test_unattributed_rows_still_count_for_a_scoped_read(self, db):
+        # the vast majority of real installs never link a per-profile
+        # Jellyfin account, so every historical play stays profile_id
+        # NULL forever - a scoped read for profile 1 must still see them.
+        self._seed(db, 'Katy Perry', 5, profile_id=None)
+
+        result = db.get_top_artists('all', 10, profile_id=1)
+
+        assert [r['name'] for r in result] == ['Katy Perry']
+
+    def test_scoped_read_excludes_a_different_profiles_attributed_plays(self, db):
+        self._seed(db, 'Kid Band', 5, profile_id=2)
+
+        result = db.get_top_artists('all', 10, profile_id=1)
+
+        assert result == []
+
+    def test_scoped_read_blends_own_plays_with_unattributed_ones(self, db):
+        self._seed(db, 'Katy Perry', 3, profile_id=1)
+        self._seed(db, 'Shared Play', 2, profile_id=None)
+        self._seed(db, 'Kid Band', 4, profile_id=2)
+
+        result = db.get_top_artists('all', 10, profile_id=1)
+
+        assert {r['name'] for r in result} == {'Katy Perry', 'Shared Play'}
