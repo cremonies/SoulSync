@@ -65,18 +65,11 @@ def test_lastfm_import_skips_probable_server_duplicates(tmp_path):
     assert db.get_listening_stats("all")["total_plays"] == 1
 
 
-def test_lastfm_import_stamps_the_configured_owner_profile(tmp_path):
-    # M01: one Last.fm account is one person's listening by definition -
-    # unlike Jellyfin's shared-server case there's a single owner to declare,
-    # not one per event.
-    class _ConfigWithOwner(_Config):
-        def get(self, key, default=None):
-            if key == "lastfm.listening_import_profile_id":
-                return 2
-            return super().get(key, default)
-
+def test_lastfm_import_stamps_the_target_profile(tmp_path):
+    # M01: each profile has its own Last.fm account, so the profile a run
+    # was started FOR is the one every row it inserts belongs to.
     db = MusicDatabase(str(tmp_path / "music.db"))
-    worker = LastFMListeningImportWorker(db, _ConfigWithOwner())
+    worker = LastFMListeningImportWorker(db, _Config())
     inserted = worker._insert_events_deduped([{
         "track_id": "lastfm-1",
         "title": "Ceremony",
@@ -85,7 +78,7 @@ def test_lastfm_import_stamps_the_configured_owner_profile(tmp_path):
         "played_at": "2023-11-14 22:13:20",
         "duration_ms": 180000,
         "db_track_id": None,
-    }])
+    }], profile_id=2)
 
     assert inserted == 1
     conn = db._get_connection()
@@ -94,9 +87,10 @@ def test_lastfm_import_stamps_the_configured_owner_profile(tmp_path):
     assert row[0] == 2
 
 
-def test_lastfm_import_stays_unattributed_when_no_owner_configured(tmp_path):
-    # Every pre-existing install (setting never configured): unchanged
-    # behaviour, rows stay NULL exactly like before this setting existed.
+def test_lastfm_import_stays_unattributed_when_no_profile_given(tmp_path):
+    # Direct low-level call with no profile_id (e.g. a caller that hasn't
+    # been made profile-aware): unchanged behaviour, rows stay NULL exactly
+    # like before per-profile attribution existed.
     db = MusicDatabase(str(tmp_path / "music.db"))
     worker = LastFMListeningImportWorker(db, _Config())
     inserted = worker._insert_events_deduped([{
@@ -402,3 +396,143 @@ def test_failed_corrected_account_does_not_keep_old_pending_cursor(tmp_path, mon
     assert state["username"] == "corrected"
     assert not state.get("last_imported_ts")
     assert not state.get("pending_last_imported_ts")
+
+
+# ── multi-profile (M01) ──────────────────────────────────────────────────
+
+def test_two_profiles_import_independently_with_their_own_usernames(tmp_path, monkeypatch):
+    """Each profile's OWN username is used for its own run, and the rows it
+    inserts carry its own profile_id - no shared state, no cross-talk."""
+    import core.listening_import.lastfm as lastfm_module
+
+    db = MusicDatabase(str(tmp_path / "music.db"))
+    db.create_profile("Parent")
+    db.create_profile("Kid")
+    db.set_profile_lastfm_username(2, "kid-fm")
+
+    seen_usernames = []
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_user_recent_tracks(self, username, page=1, limit=200, from_ts=None, to_ts=None, extended=False):
+            seen_usernames.append(username)
+            return _recent_tracks_payload(page=1, total_pages=1, uts_values=[100 + len(seen_usernames)])
+
+    monkeypatch.setattr(lastfm_module, "LastFMClient", FakeClient)
+
+    worker = LastFMListeningImportWorker(db, _Config())
+    state1 = worker.run_once(1)  # profile 1: no DB username -> legacy config "tester"
+    state2 = worker.run_once(2)  # profile 2: its own "kid-fm"
+
+    assert state1["status"] == "complete"
+    assert state2["status"] == "complete"
+    assert seen_usernames == ["tester", "kid-fm"]
+
+    conn = db._get_connection()
+    rows = conn.execute("SELECT profile_id FROM listening_history ORDER BY profile_id").fetchall()
+    conn.close()
+    assert [r[0] for r in rows] == [1, 2]
+
+
+def test_run_all_profiles_imports_everyone_with_a_username(tmp_path, monkeypatch):
+    import core.listening_import.lastfm as lastfm_module
+
+    db = MusicDatabase(str(tmp_path / "music.db"))
+    db.create_profile("Parent")
+    db.create_profile("Kid")
+    db.create_profile("Guest")
+    db.set_profile_lastfm_username(2, "kid-fm")
+    db.set_profile_lastfm_username(3, "guest-fm")
+    # profile 1 has no DB username, but _Config's legacy "lastfm.username"
+    # covers it - it must still be included.
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_user_recent_tracks(self, username, page=1, limit=200, from_ts=None, to_ts=None, extended=False):
+            calls.append(username)
+            return _recent_tracks_payload(page=1, total_pages=1, uts_values=[100 + len(calls)])
+
+    monkeypatch.setattr(lastfm_module, "LastFMClient", FakeClient)
+
+    worker = LastFMListeningImportWorker(db, _Config())
+    results = worker.run_all_profiles()
+
+    assert set(results.keys()) == {1, 2, 3}
+    assert all(r["status"] == "complete" for r in results.values())
+    assert sorted(calls) == ["guest-fm", "kid-fm", "tester"]
+
+
+def test_a_profile_with_no_username_anywhere_is_skipped_by_run_all_profiles(tmp_path, monkeypatch):
+    import core.listening_import.lastfm as lastfm_module
+
+    db = MusicDatabase(str(tmp_path / "music.db"))
+    db.create_profile("Kid")  # no lastfm_username set
+
+    class _NoLegacyConfig:
+        def get(self, key, default=None):
+            return default
+
+        def set(self, key, value):
+            pass
+
+    monkeypatch.setattr(lastfm_module, "LastFMClient", lambda **_k: None)
+
+    worker = LastFMListeningImportWorker(db, _NoLegacyConfig())
+    results = worker.run_all_profiles()
+
+    assert results == {}
+
+
+def test_is_running_is_isolated_per_profile(tmp_path, monkeypatch):
+    """One profile's in-flight import must not report another profile (or
+    the old no-arg caller) as busy, and vice versa."""
+    import threading
+    import core.listening_import.lastfm as lastfm_module
+
+    db = MusicDatabase(str(tmp_path / "music.db"))
+    db.create_profile("Parent")
+    db.create_profile("Kid")
+    db.set_profile_lastfm_username(2, "kid-fm")
+
+    release = threading.Event()
+    entered = threading.Event()
+
+    class BlockingClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_user_recent_tracks(self, username, page=1, limit=200, from_ts=None, to_ts=None, extended=False):
+            entered.set()
+            release.wait(timeout=5)
+            return _recent_tracks_payload(page=1, total_pages=1, uts_values=[100])
+
+    monkeypatch.setattr(lastfm_module, "LastFMClient", BlockingClient)
+
+    worker = LastFMListeningImportWorker(db, _Config())
+    worker.start_import(1)
+    assert entered.wait(timeout=5)
+
+    try:
+        assert worker.is_running(1) is True
+        assert worker.is_running(2) is False
+        assert worker.is_running() is True  # "is anything running" for the automation-engine guard
+
+        # NOTE: `status` here reads back as "running", not "skipped" - a
+        # pre-existing dict-merge quirk in start_import (self.status()'s own
+        # "status" key is spread in after the literal "skipped" and wins).
+        # Unrelated to per-profile isolation, so asserted on the field that
+        # actually distinguishes this response: `reason` is only ever set
+        # on the duplicate-start path.
+        skipped = worker.start_import(1)
+        assert skipped.get("reason") == "Last.fm import already running"
+    finally:
+        release.set()
+        thread = worker._threads.get(1)
+        if thread:
+            thread.join(timeout=5)

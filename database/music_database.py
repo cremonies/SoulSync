@@ -5992,6 +5992,16 @@ class MusicDatabase:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_listening_profile ON listening_history (profile_id, played_at)")
                 logger.info("Added profile_id column to listening_history")
 
+            # profiles.lastfm_username: unlike Jellyfin, reading someone's
+            # scrobbles (user.getRecentTracks) needs only their public
+            # username, not a token - so each profile just needs its own
+            # username on file, no per-profile OAuth/session-key flow.
+            cursor.execute("PRAGMA table_info(profiles)")
+            profile_cols = [c[1] for c in cursor.fetchall()]
+            if 'lastfm_username' not in profile_cols:
+                cursor.execute("ALTER TABLE profiles ADD COLUMN lastfm_username TEXT DEFAULT NULL")
+                logger.info("Added lastfm_username column to profiles")
+
         except Exception as e:
             logger.error(f"Error creating listening_history table: {e}")
 
@@ -7280,6 +7290,51 @@ class MusicDatabase:
                         for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"Error getting profiles with Jellyfin user: {e}")
+            return []
+
+    def set_profile_lastfm_username(self, profile_id: int, username: Optional[str]) -> bool:
+        """Save (or clear, with ``username=None``) a profile's own Last.fm
+        username. No token/session-key needed here - reading a public
+        Last.fm profile's scrobbles only needs the username."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE profiles SET lastfm_username = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    ((username or '').strip() or None, profile_id))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error setting Last.fm username for profile {profile_id}: {e}")
+            return False
+
+    def get_profile_lastfm_username(self, profile_id: int) -> Optional[str]:
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT lastfm_username FROM profiles WHERE id = ?", (profile_id,))
+                row = cursor.fetchone()
+                return row[0] if row and row[0] else None
+        except Exception as e:
+            logger.error(f"Error getting Last.fm username for profile {profile_id}: {e}")
+            return None
+
+    def get_profiles_with_lastfm_username(self) -> List[Dict[str, Any]]:
+        """Every profile that has its own Last.fm username on file, as
+        ``[{profile_id, lastfm_username}, ...]`` - drives the per-profile
+        scrobble import the same way get_profiles_with_jellyfin_user drives
+        per-profile play-history polling."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, lastfm_username FROM profiles
+                    WHERE lastfm_username IS NOT NULL AND lastfm_username != ''
+                """)
+                return [{'profile_id': row[0], 'lastfm_username': row[1]}
+                        for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Error getting profiles with Last.fm username: {e}")
             return []
 
     def _add_spotify_library_cache_table(self, cursor):

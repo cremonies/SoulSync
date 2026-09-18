@@ -16,6 +16,7 @@ from urllib.parse import quote, urlparse
 
 from flask import Blueprint, jsonify, request
 
+from api.helpers import parse_profile_id
 from core.metadata import is_internal_image_host
 from utils.logging_config import get_logger
 
@@ -428,28 +429,40 @@ def listening_stats_status():
 
 @bp.route('/api/lastfm/listening-import/status', methods=['GET'])
 def lastfm_listening_import_status():
-    """Get Last.fm listening-history import status."""
+    """Get Last.fm listening-history import status for one profile.
+
+    ``?profile_id=`` (or the X-Profile-Id header) picks which profile's
+    import to report - defaults to profile 1, same as every other
+    profile-scoped GET in this app (api.helpers.parse_profile_id).
+    """
     try:
         if not _lastfm_import_worker():
             return jsonify({'success': False, 'enabled': False, 'error': 'Last.fm importer unavailable'})
-        status = _lastfm_import_worker().status()
+        profile_id = parse_profile_id(request)
+        status = _lastfm_import_worker().status(profile_id)
         next_run = _automation_engine().get_system_automation_next_run_seconds('import_lastfm_listening') if _automation_engine() else 0
-        username = config_manager.get('lastfm.username', '') or status.get('username') or ''
+        own_username = get_database().get_profile_lastfm_username(profile_id)
+        if profile_id == 1:
+            # #1241: profile 1's Settings-page field still writes straight to
+            # `lastfm.username` config, not through the newer per-profile DB
+            # column, so config stays authoritative here - otherwise a
+            # correction typed in Settings would keep showing the stale value.
+            username = config_manager.get('lastfm.username', '') or own_username or status.get('username') or ''
+        else:
+            username = own_username or status.get('username') or ''
         can_use_auth_user = bool(
-            config_manager.get('lastfm.api_key', '')
+            profile_id == 1
+            and config_manager.get('lastfm.api_key', '')
             and config_manager.get('lastfm.api_secret', '')
             and config_manager.get('lastfm.session_key', '')
         )
         return jsonify({
             'success': True,
+            'profile_id': profile_id,
             'enabled': bool(config_manager.get('lastfm.listening_sync_enabled', False)),
             'api_key_configured': bool(config_manager.get('lastfm.api_key', '')),
             'authenticated_user_available': can_use_auth_user,
             'next_run_in_seconds': next_run,
-            # M01: which profile owns this Last.fm account's scrobbles - None
-            # means every imported row stays unattributed/shared, same as
-            # every install before this setting existed.
-            'profile_id': config_manager.get('lastfm.listening_import_profile_id', None),
             **status,
             'username': username,
         })
@@ -458,22 +471,30 @@ def lastfm_listening_import_status():
 
 @bp.route('/api/lastfm/listening-import/run', methods=['POST'])
 def lastfm_listening_import_run():
-    """Start or update the Last.fm listening-history import."""
+    """Start or update ONE profile's Last.fm listening-history import.
+
+    ``profile_id`` in the body (or the request's own profile, via
+    parse_profile_id) says whose account to sync - each profile keeps its
+    own username and its own independent import progress (M01), so this
+    never touches another profile's data or in-flight run.
+    """
     try:
         if not _lastfm_import_worker():
             return jsonify({'success': False, 'error': 'Last.fm importer unavailable'}), 400
         body = request.get_json(silent=True) or {}
-        username = str(body.get('username') or config_manager.get('lastfm.username', '') or '').strip()
+        profile_id = int(body['profile_id']) if 'profile_id' in body else parse_profile_id(request)
+        db = get_database()
+        username = str(body.get('username') or db.get_profile_lastfm_username(profile_id) or '').strip()
         if username:
-            config_manager.set('lastfm.username', username)
+            db.set_profile_lastfm_username(profile_id, username)
+            if profile_id == 1:
+                # keeps the legacy global setting (still read by anything
+                # that hasn't been made profile-aware) in sync for profile 1
+                config_manager.set('lastfm.username', username)
         if 'enabled' in body:
             config_manager.set('lastfm.listening_sync_enabled', bool(body.get('enabled')))
-        if 'profile_id' in body:
-            raw_profile_id = body.get('profile_id')
-            config_manager.set(
-                'lastfm.listening_import_profile_id',
-                int(raw_profile_id) if raw_profile_id is not None else None)
-        result = _lastfm_import_worker().start_import(username=username or None, full=bool(body.get('full')))
+        result = _lastfm_import_worker().start_import(
+            profile_id, username or None, full=bool(body.get('full')))
         ok = result.get('status') not in ('error',)
         return jsonify({'success': ok, **result}), 200 if ok else 400
     except Exception as e:
@@ -481,12 +502,14 @@ def lastfm_listening_import_run():
 
 @bp.route('/api/lastfm/listening-import/cancel', methods=['POST'])
 def lastfm_listening_import_cancel():
-    """Cancel the active Last.fm listening-history import."""
+    """Cancel one profile's active Last.fm listening-history import."""
     try:
         if not _lastfm_import_worker():
             return jsonify({'success': False, 'error': 'Last.fm importer unavailable'}), 400
-        _lastfm_import_worker().cancel()
-        return jsonify({'success': True, **_lastfm_import_worker().status()})
+        body = request.get_json(silent=True) or {}
+        profile_id = int(body['profile_id']) if 'profile_id' in body else parse_profile_id(request)
+        _lastfm_import_worker().cancel(profile_id)
+        return jsonify({'success': True, **_lastfm_import_worker().status(profile_id)})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

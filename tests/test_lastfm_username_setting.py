@@ -62,12 +62,13 @@ def test_the_key_path_is_the_one_the_importer_reads():
 
     The settings POST writes `<section>.<key>`, so a `username` key inside the
     `lastfm` section becomes `lastfm.username` — which is exactly what the
-    importer and the automation handler ask for.
+    importer's legacy (profile-1) fallback asks for. The automation handler
+    no longer resolves usernames itself (M01: per-profile usernames live on
+    `profiles.lastfm_username` and the importer resolves them internally per
+    profile) — it just tells the worker which profile(s) to run.
     """
     importer = (_ROOT / "core" / "listening_import" / "lastfm.py").read_text(encoding="utf-8")
-    handler = (_ROOT / "core" / "automation" / "handlers" / "lastfm_import.py").read_text(encoding="utf-8")
     assert 'get("lastfm.username"' in importer
-    assert 'get("lastfm.username"' in handler
 
 
 def test_lastfm_is_a_section_the_server_persists():
@@ -83,8 +84,9 @@ def test_status_returns_corrected_configuration_instead_of_failed_username(monke
     from types import SimpleNamespace
     import api.stats as stats
     monkeypatch.setattr(stats, "config_manager", SimpleNamespace(get=lambda key, default=None: {"lastfm.username": "corrected", "lastfm.api_key": "key"}.get(key, default)))
-    monkeypatch.setattr(stats, "_lastfm_import_worker", lambda: SimpleNamespace(status=lambda: {"username": "k", "status": "error"}))
+    monkeypatch.setattr(stats, "_lastfm_import_worker", lambda: SimpleNamespace(status=lambda profile_id: {"username": "k", "status": "error"}))
     monkeypatch.setattr(stats, "_automation_engine", lambda: None)
+    monkeypatch.setattr(stats, "get_database", lambda: SimpleNamespace(get_profile_lastfm_username=lambda profile_id: None))
     app = Flask(__name__)
     app.register_blueprint(stats.bp)
     response = app.test_client().get("/api/lastfm/listening-import/status")
@@ -92,38 +94,47 @@ def test_status_returns_corrected_configuration_instead_of_failed_username(monke
     assert response.get_json()["username"] == "corrected"
 
 
-def test_status_reports_the_configured_owner_profile(monkeypatch):
-    """M01: the Stats page needs to know which profile owns the Last.fm
-    import to show/edit it, same as it already shows the username."""
+def test_status_reports_a_second_profiles_own_username(monkeypatch):
+    """M01: each profile has its own Last.fm account - the Stats page needs
+    to show/edit THAT profile's username, not profile 1's."""
     from flask import Flask
     from types import SimpleNamespace
     import api.stats as stats
     monkeypatch.setattr(stats, "config_manager", SimpleNamespace(get=lambda key, default=None: {
-        "lastfm.username": "tester", "lastfm.api_key": "key",
-        "lastfm.listening_import_profile_id": 2,
+        "lastfm.api_key": "key",
     }.get(key, default)))
-    monkeypatch.setattr(stats, "_lastfm_import_worker", lambda: SimpleNamespace(status=lambda: {"username": "tester", "status": "idle"}))
+    monkeypatch.setattr(stats, "_lastfm_import_worker", lambda: SimpleNamespace(status=lambda profile_id: {"status": "idle"}))
     monkeypatch.setattr(stats, "_automation_engine", lambda: None)
+    monkeypatch.setattr(stats, "get_database", lambda: SimpleNamespace(
+        get_profile_lastfm_username=lambda profile_id: "kid-account" if profile_id == 2 else None))
     app = Flask(__name__)
     app.register_blueprint(stats.bp)
-    response = app.test_client().get("/api/lastfm/listening-import/status")
+    response = app.test_client().get("/api/lastfm/listening-import/status?profile_id=2")
     assert response.status_code == 200
-    assert response.get_json()["profile_id"] == 2
+    body = response.get_json()
+    assert body["profile_id"] == 2
+    assert body["username"] == "kid-account"
 
 
-def test_run_saves_the_owner_profile_from_the_request_body(monkeypatch):
+def test_run_saves_the_username_against_the_request_profile(monkeypatch):
     from flask import Flask
     from types import SimpleNamespace
     import api.stats as stats
-    saved = {}
+    saved_db = {}
     monkeypatch.setattr(stats, "config_manager", SimpleNamespace(
-        get=lambda key, default=None: {"lastfm.username": "tester", "lastfm.api_key": "key"}.get(key, default),
-        set=lambda key, value: saved.__setitem__(key, value),
+        get=lambda key, default=None: {"lastfm.api_key": "key"}.get(key, default),
+        set=lambda key, value: None,
     ))
     monkeypatch.setattr(stats, "_lastfm_import_worker", lambda: SimpleNamespace(
-        start_import=lambda username=None, full=False: {"status": "running"}))
+        start_import=lambda profile_id, username=None, full=False: {"status": "started", "profile_id": profile_id, "username": username}))
+    monkeypatch.setattr(stats, "get_database", lambda: SimpleNamespace(
+        get_profile_lastfm_username=lambda profile_id: None,
+        set_profile_lastfm_username=lambda profile_id, username: saved_db.__setitem__(profile_id, username),
+    ))
     app = Flask(__name__)
     app.register_blueprint(stats.bp)
-    response = app.test_client().post("/api/lastfm/listening-import/run", json={"profile_id": 2})
+    response = app.test_client().post(
+        "/api/lastfm/listening-import/run", json={"profile_id": 2, "username": "kid-account"})
     assert response.status_code == 200
-    assert saved["lastfm.listening_import_profile_id"] == 2
+    assert saved_db[2] == "kid-account"
+    assert response.get_json()["profile_id"] == 2

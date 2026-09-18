@@ -3,6 +3,17 @@
 This is account-history ingestion, not metadata enrichment. It shares the
 Last.fm client/config but writes canonical rows into ``listening_history`` so
 Stats, discovery, and Year in Listening keep reading one source of truth.
+
+Per-profile (M01): ``user.getRecentTracks`` is public for a public Last.fm
+profile and needs only a username, not a token, so each SoulSync profile
+just needs its OWN username on file (``profiles.lastfm_username``) - no
+per-profile OAuth/session-key flow like ListenBrainz needs. Every piece of
+per-run state (username, pagination cursor, backfill progress, running
+thread) is keyed by profile_id so one profile's import can never clobber or
+block another's. Profile 1 additionally falls back to the pre-existing
+single global ``lastfm.username``/session-key config when it has no
+profile-specific username of its own, so an install that upgrades into this
+keeps working without anyone having to redo setup.
 """
 
 from __future__ import annotations
@@ -26,19 +37,24 @@ RECENT_OVERLAP_SECONDS = 24 * 60 * 60
 STOP_AFTER_DUPLICATE_PAGES = 3
 TRANSIENT_PAGE_RETRIES = 4
 TRANSIENT_PAGE_RETRY_BASE_SECONDS = 5
+DEFAULT_PROFILE_ID = 1
 
 
 def _safe_error_message(error: Exception) -> str:
     return re.sub(r"([?&]api_key=)[^&\s]+", r"\1REDACTED", str(error))
 
 
-class LastFMListeningImportWorker:
-    """Imports Last.fm scrobbles into ``listening_history``.
+def _state_key(profile_id: int) -> str:
+    return f"{STATE_KEY}:{profile_id}"
 
-    The worker is intentionally small and single-flight. Automations, manual
-    run buttons, and future settings toggles can all call ``start_import``; if
-    a run is already active they get a skipped response instead of creating a
-    second paginated crawl.
+
+class LastFMListeningImportWorker:
+    """Imports Last.fm scrobbles into ``listening_history``, per profile.
+
+    Single-flight PER PROFILE: two profiles can import concurrently (each
+    genuinely is a different Last.fm account), but starting a second import
+    for a profile that's already running gets a skipped response instead of
+    a second concurrent paginated crawl of the same account.
     """
 
     def __init__(
@@ -54,17 +70,22 @@ class LastFMListeningImportWorker:
         self.cache_builder = cache_builder
         self.progress_callback = progress_callback
         self._lock = threading.Lock()
-        self._thread: Optional[threading.Thread] = None
-        self._cancel = threading.Event()
-        self._state = self._load_state()
+        self._threads: Dict[int, threading.Thread] = {}
+        self._cancels: Dict[int, threading.Event] = {}
+        self._states: Dict[int, Dict[str, Any]] = {}
 
-    def is_running(self) -> bool:
-        thread = self._thread
-        return bool(thread and thread.is_alive())
+    def is_running(self, profile_id: Optional[int] = None) -> bool:
+        """Whether a specific profile's import is running, or (profile_id
+        omitted) whether ANY profile's import is running - the shape the
+        automation engine's "don't double-schedule" guard wants."""
+        if profile_id is not None:
+            thread = self._threads.get(profile_id)
+            return bool(thread and thread.is_alive())
+        return any(t.is_alive() for t in self._threads.values())
 
-    def status(self) -> Dict[str, Any]:
-        state = dict(self._state or {})
-        running = self.is_running()
+    def status(self, profile_id: int = DEFAULT_PROFILE_ID) -> Dict[str, Any]:
+        state = dict(self._load_state(profile_id))
+        running = self.is_running(profile_id)
         if not running and state.get("status") == "running":
             state.update(
                 status="partial",
@@ -80,50 +101,75 @@ class LastFMListeningImportWorker:
                 last_success_at=None,
             )
         state["running"] = running
+        state["profile_id"] = profile_id
         state.setdefault("status", "idle")
         state.setdefault("source", SOURCE)
         return state
 
-    def start_import(self, username: Optional[str] = None, *, full: bool = False) -> Dict[str, Any]:
+    def start_import(self, profile_id: int = DEFAULT_PROFILE_ID,
+                     username: Optional[str] = None, *, full: bool = False) -> Dict[str, Any]:
         with self._lock:
-            if self.is_running():
-                return {"status": "skipped", "reason": "Last.fm import already running", **self.status()}
-            self._cancel.clear()
-            target = self._resolve_username(username)
+            if self.is_running(profile_id):
+                return {"status": "skipped", "reason": "Last.fm import already running",
+                        **self.status(profile_id)}
+            self._cancels[profile_id] = threading.Event()
+            target = self._resolve_username(profile_id, username)
             if not target:
-                state = self._set_state(status="error", error="Last.fm username not configured")
+                state = self._set_state(profile_id, status="error", error="Last.fm username not configured")
                 return {"status": "error", "error": state["error"], **state}
             if not self.config_manager.get("lastfm.api_key", ""):
-                state = self._set_state(status="error", error="Last.fm API key not configured")
+                state = self._set_state(profile_id, status="error", error="Last.fm API key not configured")
                 return {"status": "error", "error": state["error"], **state}
 
-            self._thread = threading.Thread(
+            thread = threading.Thread(
                 target=self._run,
-                args=(target, full),
+                args=(profile_id, target, full),
                 daemon=True,
-                name="lastfm-listening-import",
+                name=f"lastfm-listening-import-{profile_id}",
             )
-            self._thread.start()
-            return {"status": "started", "username": target}
+            self._threads[profile_id] = thread
+            thread.start()
+            return {"status": "started", "username": target, "profile_id": profile_id}
 
-    def run_once(self, username: Optional[str] = None, *, full: bool = False) -> Dict[str, Any]:
-        started = self.start_import(username, full=full)
+    def run_once(self, profile_id: int = DEFAULT_PROFILE_ID,
+                 username: Optional[str] = None, *, full: bool = False) -> Dict[str, Any]:
+        started = self.start_import(profile_id, username, full=full)
         if started.get("status") == "started":
-            thread = self._thread
+            thread = self._threads.get(profile_id)
             if thread:
                 thread.join()
-            return self.status()
+            return self.status(profile_id)
         return started
 
-    def cancel(self) -> None:
-        self._cancel.set()
+    def run_all_profiles(self, *, full: bool = False) -> Dict[int, Dict[str, Any]]:
+        """Sequentially import every profile with its own Last.fm username
+        configured (plus profile 1 via the legacy global config, if it has
+        no profile-specific username of its own). Sequential, not
+        concurrent-per-profile: simpler, and avoids every profile's crawl
+        hitting Last.fm's rate limit at the same moment. Used by the
+        scheduled automation; a manual "sync my Last.fm" button should call
+        run_once for just that one profile instead."""
+        targets = {row['profile_id']: row['lastfm_username']
+                   for row in self.db.get_profiles_with_lastfm_username()}
+        if DEFAULT_PROFILE_ID not in targets and self._legacy_username_configured():
+            targets[DEFAULT_PROFILE_ID] = None  # resolved from legacy config inside run_once
+        results: Dict[int, Dict[str, Any]] = {}
+        for profile_id, username in targets.items():
+            results[profile_id] = self.run_once(profile_id, username, full=full)
+        return results
 
-    def _run(self, username: str, full: bool) -> None:
+    def cancel(self, profile_id: int = DEFAULT_PROFILE_ID) -> None:
+        event = self._cancels.get(profile_id)
+        if event:
+            event.set()
+
+    def _run(self, profile_id: int, username: str, full: bool) -> None:
         start_ts = time.time()
-        previous = self._load_state()
+        cancel_event = self._cancels.setdefault(profile_id, threading.Event())
+        previous = self._load_state(profile_id)
         if previous.get("username") and str(previous["username"]).casefold() != username.casefold():
             previous = {}
-            self._state = {}
+            self._states[profile_id] = {}
         previous_page = _int(previous.get("page"))
         previous_total_pages = _int(previous.get("total_pages"))
         previous_complete_is_suspect = _is_incomplete_backfill_state(previous)
@@ -145,6 +191,7 @@ class LastFMListeningImportWorker:
         )
 
         self._set_state(
+            profile_id,
             status="running",
             username=username,
             phase="Starting Last.fm import" if start_page == 1 else f"Resuming Last.fm import at page {start_page}",
@@ -172,8 +219,8 @@ class LastFMListeningImportWorker:
         completed_backfill = False
 
         try:
-            while not self._cancel.is_set():
-                data = self._get_recent_tracks_page(client, username, page, from_ts)
+            while not cancel_event.is_set():
+                data = self._get_recent_tracks_page(client, username, page, from_ts, profile_id, cancel_event)
                 if data is None:
                     break
                 recent = (data or {}).get("recenttracks") or {}
@@ -190,7 +237,7 @@ class LastFMListeningImportWorker:
 
                 events = [ev for ev in (normalize_lastfm_scrobble(t) for t in tracks) if ev]
                 self._resolve_db_track_ids(events)
-                inserted = self._insert_events_deduped(events)
+                inserted = self._insert_events_deduped(events, profile_id)
                 imported_total += len(events)
                 inserted_total += inserted
                 duplicate_total += max(0, len(events) - inserted)
@@ -230,7 +277,7 @@ class LastFMListeningImportWorker:
                             else previous.get("pending_last_imported_at")
                         ),
                     )
-                self._set_state(**checkpoint)
+                self._set_state(profile_id, **checkpoint)
 
                 if use_incremental and duplicate_pages >= STOP_AFTER_DUPLICATE_PAGES:
                     break
@@ -239,7 +286,7 @@ class LastFMListeningImportWorker:
                     break
                 page += 1
 
-            cancelled = self._cancel.is_set()
+            cancelled = cancel_event.is_set()
             status = "cancelled" if cancelled else "complete"
             final_progress = _progress(page, total_pages)
             final_updates = {
@@ -280,18 +327,19 @@ class LastFMListeningImportWorker:
                     last_imported_ts=_int(previous.get("last_imported_ts")),
                     last_imported_at=previous.get("last_imported_at"),
                 )
-            self._set_state(**final_updates)
+            self._set_state(profile_id, **final_updates)
             if status == "complete" and self.cache_builder:
                 try:
-                    self._set_state(phase="Rebuilding stats cache")
+                    self._set_state(profile_id, phase="Rebuilding stats cache")
                     self.cache_builder()
-                    self._set_state(phase="Last.fm is up to date")
+                    self._set_state(profile_id, phase="Last.fm is up to date")
                 except Exception as e:
                     logger.warning("Last.fm import finished but stats cache rebuild failed: %s", e)
         except Exception as e:
             safe_error = _safe_error_message(e)
-            logger.error("Last.fm listening import failed: %s", safe_error, exc_info=True)
+            logger.error("Last.fm listening import failed for profile %s: %s", profile_id, safe_error, exc_info=True)
             self._set_state(
+                profile_id,
                 status="error",
                 phase="Last.fm import failed",
                 error=safe_error,
@@ -301,7 +349,9 @@ class LastFMListeningImportWorker:
                 backfill_next_page=page if not use_incremental else None,
             )
 
-    def _get_recent_tracks_page(self, client: LastFMClient, username: str, page: int, from_ts: Optional[int]) -> Optional[Dict[str, Any]]:
+    def _get_recent_tracks_page(self, client: LastFMClient, username: str, page: int,
+                                from_ts: Optional[int], profile_id: int,
+                                cancel_event: threading.Event) -> Optional[Dict[str, Any]]:
         for attempt in range(1, TRANSIENT_PAGE_RETRIES + 1):
             try:
                 return client.get_user_recent_tracks(username, page=page, limit=PAGE_LIMIT, from_ts=from_ts)
@@ -310,26 +360,53 @@ class LastFMListeningImportWorker:
                     raise
                 delay = min(60, TRANSIENT_PAGE_RETRY_BASE_SECONDS * attempt)
                 self._set_state(
+                    profile_id,
                     status="running",
                     phase=f"Last.fm API hiccup on page {page}; retrying in {delay}s",
                     page=page - 1,
                     error=_safe_error_message(e),
                 )
-                if not self._sleep_retry(delay):
+                if not self._sleep_retry(delay, cancel_event):
                     return None
         return None
 
-    def _sleep_retry(self, seconds: int) -> bool:
+    def _sleep_retry(self, seconds: int, cancel_event: threading.Event) -> bool:
         for _ in range(max(0, seconds)):
-            if self._cancel.is_set():
+            if cancel_event.is_set():
                 return False
             time.sleep(1)
-        return not self._cancel.is_set()
+        return not cancel_event.is_set()
 
-    def _resolve_username(self, username: Optional[str]) -> str:
-        configured = username or self.config_manager.get("lastfm.username", "")
-        if configured:
-            return str(configured).strip()
+    def _legacy_username_configured(self) -> bool:
+        if self.config_manager.get("lastfm.username", ""):
+            return True
+        return bool(self.config_manager.get("lastfm.api_secret", "")
+                    and self.config_manager.get("lastfm.session_key", ""))
+
+    def _resolve_username(self, profile_id: int, username: Optional[str]) -> str:
+        if username:
+            return str(username).strip()
+
+        # #1241: profile 1's Settings-page field writes straight to the
+        # legacy `lastfm.username` config, not the per-profile DB column, so
+        # config stays authoritative for profile 1 - otherwise a correction
+        # typed in Settings would keep resolving to a stale DB value.
+        if profile_id == DEFAULT_PROFILE_ID:
+            configured = self.config_manager.get("lastfm.username", "")
+            if configured:
+                return str(configured).strip()
+
+        own = self.db.get_profile_lastfm_username(profile_id)
+        if own:
+            return str(own).strip()
+
+        # Session-key-authenticated-user lookup - only profile 1 inherits
+        # this legacy path, so an upgrading single-user install keeps
+        # working without reconfiguring, and it never leaks a random
+        # profile's plays onto someone else's.
+        if profile_id != DEFAULT_PROFILE_ID:
+            return ""
+
         api_secret = self.config_manager.get("lastfm.api_secret", "")
         session_key = self.config_manager.get("lastfm.session_key", "")
         if not api_secret or not session_key:
@@ -378,20 +455,11 @@ class LastFMListeningImportWorker:
         finally:
             conn.close()
 
-    def _insert_events_deduped(self, events: Iterable[Dict[str, Any]]) -> int:
+    def _insert_events_deduped(self, events: Iterable[Dict[str, Any]],
+                               profile_id: Optional[int] = None) -> int:
         clean = [ev for ev in events if ev.get("title") and ev.get("played_at")]
         if not clean:
             return 0
-        # M01: one Last.fm account importing scrobbles is, by definition, one
-        # specific person's listening - unlike a shared Jellyfin server, there
-        # is no per-event ambiguity to resolve, just a single owner to
-        # declare. `lastfm.listening_import_profile_id` names that profile;
-        # unset (the pre-existing installs that never configured it) keeps
-        # writing NULL/unattributed, same as before this setting existed.
-        try:
-            owner_profile_id = self.config_manager.get('lastfm.listening_import_profile_id', None)
-        except Exception:
-            owner_profile_id = None
         conn = self.db._get_connection()
         try:
             cursor = conn.cursor()
@@ -415,7 +483,7 @@ class LastFMListeningImportWorker:
                         ev.get("duration_ms", 0),
                         SOURCE,
                         ev.get("db_track_id"),
-                        owner_profile_id,
+                        profile_id,
                     ),
                 )
                 inserted += 1 if cursor.rowcount > 0 else 0
@@ -454,23 +522,32 @@ class LastFMListeningImportWorker:
                 duplicates.add(key)
         return duplicates
 
-    def _load_state(self) -> Dict[str, Any]:
+    def _load_state(self, profile_id: int = DEFAULT_PROFILE_ID) -> Dict[str, Any]:
+        if profile_id in self._states:
+            return self._states[profile_id]
         try:
-            raw = self.db.get_metadata(STATE_KEY)
-            return json.loads(raw) if raw else {"status": "idle", "source": SOURCE}
+            raw = self.db.get_metadata(_state_key(profile_id))
+            if not raw and profile_id == DEFAULT_PROFILE_ID:
+                # Migration continuity: an install upgrading into per-profile
+                # state still has its progress under the old unscoped key -
+                # adopt it as profile 1's rather than restarting its backfill.
+                raw = self.db.get_metadata(STATE_KEY)
+            state = json.loads(raw) if raw else {"status": "idle", "source": SOURCE}
         except Exception:
-            return {"status": "idle", "source": SOURCE}
+            state = {"status": "idle", "source": SOURCE}
+        self._states[profile_id] = state
+        return state
 
-    def _set_state(self, **updates) -> Dict[str, Any]:
-        state = {**(self._state or {}), **updates, "source": SOURCE, "updated_at": _now_iso()}
-        self._state = state
+    def _set_state(self, profile_id: int = DEFAULT_PROFILE_ID, **updates) -> Dict[str, Any]:
+        state = {**self._load_state(profile_id), **updates, "source": SOURCE, "updated_at": _now_iso()}
+        self._states[profile_id] = state
         try:
-            self.db.set_metadata(STATE_KEY, json.dumps(state))
+            self.db.set_metadata(_state_key(profile_id), json.dumps(state))
         except Exception as e:
-            logger.debug("Could not persist Last.fm import state: %s", e)
+            logger.debug("Could not persist Last.fm import state for profile %s: %s", profile_id, e)
         if self.progress_callback:
             try:
-                self.progress_callback(self.status())
+                self.progress_callback(self.status(profile_id))
             except Exception as e:
                 logger.debug("Last.fm import progress callback failed: %s", e)
         return state
@@ -555,4 +632,3 @@ def _progress(page: int, total_pages: Optional[int]) -> int:
     if not total_pages:
         return 0
     return max(0, min(99, round((page / max(total_pages, 1)) * 100)))
-

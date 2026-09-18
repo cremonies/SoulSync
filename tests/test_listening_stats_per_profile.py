@@ -87,6 +87,39 @@ class TestGetProfilesWithJellyfinUser:
         assert db.get_profiles_with_jellyfin_user() == []
 
 
+class TestProfileLastfmUsername:
+    def test_set_then_get_round_trips(self, db):
+        profile_id = db.create_profile('Parent')
+        assert db.set_profile_lastfm_username(profile_id, 'my-lastfm-name') is True
+        assert db.get_profile_lastfm_username(profile_id) == 'my-lastfm-name'
+
+    def test_unset_profile_returns_none(self, db):
+        profile_id = db.create_profile('Solo')
+        assert db.get_profile_lastfm_username(profile_id) is None
+
+    def test_clearing_with_none_removes_it(self, db):
+        profile_id = db.create_profile('Parent')
+        db.set_profile_lastfm_username(profile_id, 'my-lastfm-name')
+        db.set_profile_lastfm_username(profile_id, None)
+        assert db.get_profile_lastfm_username(profile_id) is None
+
+    def test_blank_string_is_treated_as_clearing(self, db):
+        profile_id = db.create_profile('Parent')
+        db.set_profile_lastfm_username(profile_id, '  ')
+        assert db.get_profile_lastfm_username(profile_id) is None
+
+    def test_get_profiles_with_lastfm_username_only_lists_configured_ones(self, db):
+        p1 = db.create_profile('Parent')
+        p2 = db.create_profile('Kid')
+        db.create_profile('Unconfigured')
+        db.set_profile_lastfm_username(p1, 'parent-fm')
+        db.set_profile_lastfm_username(p2, 'kid-fm')
+
+        linked = db.get_profiles_with_lastfm_username()
+        by_profile = {row['profile_id']: row['lastfm_username'] for row in linked}
+        assert by_profile == {p1: 'parent-fm', p2: 'kid-fm'}
+
+
 class TestPerProfileJellyfinPoll:
     def test_linked_profiles_polled_individually_and_attributed(self, db):
         parent_id = db.create_profile('Parent')
