@@ -382,6 +382,16 @@ class LastFMListeningImportWorker:
         clean = [ev for ev in events if ev.get("title") and ev.get("played_at")]
         if not clean:
             return 0
+        # M01: one Last.fm account importing scrobbles is, by definition, one
+        # specific person's listening - unlike a shared Jellyfin server, there
+        # is no per-event ambiguity to resolve, just a single owner to
+        # declare. `lastfm.listening_import_profile_id` names that profile;
+        # unset (the pre-existing installs that never configured it) keeps
+        # writing NULL/unattributed, same as before this setting existed.
+        try:
+            owner_profile_id = self.config_manager.get('lastfm.listening_import_profile_id', None)
+        except Exception:
+            owner_profile_id = None
         conn = self.db._get_connection()
         try:
             cursor = conn.cursor()
@@ -393,8 +403,8 @@ class LastFMListeningImportWorker:
                 cursor.execute(
                     """
                     INSERT OR IGNORE INTO listening_history
-                        (track_id, title, artist, album, played_at, duration_ms, server_source, db_track_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (track_id, title, artist, album, played_at, duration_ms, server_source, db_track_id, profile_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ev.get("track_id"),
@@ -405,6 +415,7 @@ class LastFMListeningImportWorker:
                         ev.get("duration_ms", 0),
                         SOURCE,
                         ev.get("db_track_id"),
+                        owner_profile_id,
                     ),
                 )
                 inserted += 1 if cursor.rowcount > 0 else 0

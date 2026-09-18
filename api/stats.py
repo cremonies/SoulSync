@@ -446,6 +446,10 @@ def lastfm_listening_import_status():
             'api_key_configured': bool(config_manager.get('lastfm.api_key', '')),
             'authenticated_user_available': can_use_auth_user,
             'next_run_in_seconds': next_run,
+            # M01: which profile owns this Last.fm account's scrobbles - None
+            # means every imported row stays unattributed/shared, same as
+            # every install before this setting existed.
+            'profile_id': config_manager.get('lastfm.listening_import_profile_id', None),
             **status,
             'username': username,
         })
@@ -464,6 +468,11 @@ def lastfm_listening_import_run():
             config_manager.set('lastfm.username', username)
         if 'enabled' in body:
             config_manager.set('lastfm.listening_sync_enabled', bool(body.get('enabled')))
+        if 'profile_id' in body:
+            raw_profile_id = body.get('profile_id')
+            config_manager.set(
+                'lastfm.listening_import_profile_id',
+                int(raw_profile_id) if raw_profile_id is not None else None)
         result = _lastfm_import_worker().start_import(username=username or None, full=bool(body.get('full')))
         ok = result.get('status') not in ('error',)
         return jsonify({'success': ok, **result}), 200 if ok else 400

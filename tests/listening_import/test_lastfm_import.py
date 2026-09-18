@@ -65,6 +65,56 @@ def test_lastfm_import_skips_probable_server_duplicates(tmp_path):
     assert db.get_listening_stats("all")["total_plays"] == 1
 
 
+def test_lastfm_import_stamps_the_configured_owner_profile(tmp_path):
+    # M01: one Last.fm account is one person's listening by definition -
+    # unlike Jellyfin's shared-server case there's a single owner to declare,
+    # not one per event.
+    class _ConfigWithOwner(_Config):
+        def get(self, key, default=None):
+            if key == "lastfm.listening_import_profile_id":
+                return 2
+            return super().get(key, default)
+
+    db = MusicDatabase(str(tmp_path / "music.db"))
+    worker = LastFMListeningImportWorker(db, _ConfigWithOwner())
+    inserted = worker._insert_events_deduped([{
+        "track_id": "lastfm-1",
+        "title": "Ceremony",
+        "artist": "New Order",
+        "album": "Substance",
+        "played_at": "2023-11-14 22:13:20",
+        "duration_ms": 180000,
+        "db_track_id": None,
+    }])
+
+    assert inserted == 1
+    conn = db._get_connection()
+    row = conn.execute("SELECT profile_id FROM listening_history").fetchone()
+    conn.close()
+    assert row[0] == 2
+
+
+def test_lastfm_import_stays_unattributed_when_no_owner_configured(tmp_path):
+    # Every pre-existing install (setting never configured): unchanged
+    # behaviour, rows stay NULL exactly like before this setting existed.
+    db = MusicDatabase(str(tmp_path / "music.db"))
+    worker = LastFMListeningImportWorker(db, _Config())
+    inserted = worker._insert_events_deduped([{
+        "track_id": "lastfm-1",
+        "title": "Ceremony",
+        "artist": "New Order",
+        "album": "Substance",
+        "played_at": "2023-11-14 22:13:20",
+        "duration_ms": 180000,
+        "db_track_id": None,
+    }])
+
+    assert inserted == 1
+    conn = db._get_connection()
+    row = conn.execute("SELECT profile_id FROM listening_history").fetchone()
+    conn.close()
+    assert row[0] is None
+
 
 def test_lastfm_backfill_error_does_not_advance_incremental_cursor(tmp_path, monkeypatch):
     import core.listening_import.lastfm as lastfm_module

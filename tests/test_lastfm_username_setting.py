@@ -90,3 +90,40 @@ def test_status_returns_corrected_configuration_instead_of_failed_username(monke
     response = app.test_client().get("/api/lastfm/listening-import/status")
     assert response.status_code == 200
     assert response.get_json()["username"] == "corrected"
+
+
+def test_status_reports_the_configured_owner_profile(monkeypatch):
+    """M01: the Stats page needs to know which profile owns the Last.fm
+    import to show/edit it, same as it already shows the username."""
+    from flask import Flask
+    from types import SimpleNamespace
+    import api.stats as stats
+    monkeypatch.setattr(stats, "config_manager", SimpleNamespace(get=lambda key, default=None: {
+        "lastfm.username": "tester", "lastfm.api_key": "key",
+        "lastfm.listening_import_profile_id": 2,
+    }.get(key, default)))
+    monkeypatch.setattr(stats, "_lastfm_import_worker", lambda: SimpleNamespace(status=lambda: {"username": "tester", "status": "idle"}))
+    monkeypatch.setattr(stats, "_automation_engine", lambda: None)
+    app = Flask(__name__)
+    app.register_blueprint(stats.bp)
+    response = app.test_client().get("/api/lastfm/listening-import/status")
+    assert response.status_code == 200
+    assert response.get_json()["profile_id"] == 2
+
+
+def test_run_saves_the_owner_profile_from_the_request_body(monkeypatch):
+    from flask import Flask
+    from types import SimpleNamespace
+    import api.stats as stats
+    saved = {}
+    monkeypatch.setattr(stats, "config_manager", SimpleNamespace(
+        get=lambda key, default=None: {"lastfm.username": "tester", "lastfm.api_key": "key"}.get(key, default),
+        set=lambda key, value: saved.__setitem__(key, value),
+    ))
+    monkeypatch.setattr(stats, "_lastfm_import_worker", lambda: SimpleNamespace(
+        start_import=lambda username=None, full=False: {"status": "running"}))
+    app = Flask(__name__)
+    app.register_blueprint(stats.bp)
+    response = app.test_client().post("/api/lastfm/listening-import/run", json={"profile_id": 2})
+    assert response.status_code == 200
+    assert saved["lastfm.listening_import_profile_id"] == 2
