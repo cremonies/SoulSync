@@ -5981,6 +5981,17 @@ class MusicDatabase:
                 cursor.execute("ALTER TABLE listening_history ADD COLUMN scrobbled_listenbrainz INTEGER DEFAULT 0")
                 logger.info("Added scrobbled_listenbrainz column to listening_history")
 
+            # profile_id: NULL means "cannot be attributed to one profile",
+            # not "belongs to profile 1" - existing rows stay NULL forever
+            # (M01: never guess an owner for a play recorded before this
+            # column existed). New rows get it when the poller/web-player
+            # can name the profile it came from; a shared/unlinked source
+            # still writes NULL, same as before this column existed.
+            if 'profile_id' not in lh_cols:
+                cursor.execute("ALTER TABLE listening_history ADD COLUMN profile_id INTEGER DEFAULT NULL")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_listening_profile ON listening_history (profile_id, played_at)")
+                logger.info("Added profile_id column to listening_history")
+
         except Exception as e:
             logger.error(f"Error creating listening_history table: {e}")
 
@@ -5997,8 +6008,8 @@ class MusicDatabase:
                 try:
                     cursor.execute("""
                         INSERT OR IGNORE INTO listening_history
-                            (track_id, title, artist, album, played_at, duration_ms, server_source, db_track_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            (track_id, title, artist, album, played_at, duration_ms, server_source, db_track_id, profile_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         event.get('track_id'),
                         event.get('title', ''),
@@ -6008,6 +6019,7 @@ class MusicDatabase:
                         event.get('duration_ms', 0),
                         event.get('server_source', ''),
                         event.get('db_track_id'),
+                        event.get('profile_id'),
                     ))
                     if cursor.rowcount > 0:
                         inserted += 1
@@ -7247,6 +7259,28 @@ class MusicDatabase:
         except Exception as e:
             logger.error(f"Error getting server library for profile {profile_id}: {e}")
             return {}
+
+    def get_profiles_with_jellyfin_user(self) -> List[Dict[str, Any]]:
+        """Every profile that has linked its own Jellyfin user, as
+        ``[{profile_id, jellyfin_user_id}, ...]``.
+
+        Drives per-profile play-history polling: a profile not in this list
+        has no personal Jellyfin identity to poll, so its plays stay in the
+        shared/unattributed pool exactly as they did before per-profile
+        polling existed.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, jellyfin_user_id FROM profiles
+                    WHERE jellyfin_user_id IS NOT NULL AND jellyfin_user_id != ''
+                """)
+                return [{'profile_id': row[0], 'jellyfin_user_id': row[1]}
+                        for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Error getting profiles with Jellyfin user: {e}")
+            return []
 
     def _add_spotify_library_cache_table(self, cursor):
         """Create spotify_library_cache table for caching user's saved Spotify albums"""

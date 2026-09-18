@@ -19,7 +19,7 @@ class FakeDb:
             c.executescript("""
                 CREATE TABLE listening_history (
                     id INTEGER PRIMARY KEY, artist TEXT, title TEXT,
-                    album TEXT, played_at TEXT);
+                    album TEXT, played_at TEXT, profile_id INTEGER);
                 CREATE TABLE artists (
                     id INTEGER PRIMARY KEY, name TEXT, lastfm_tags TEXT,
                     genres TEXT, mood TEXT, style TEXT);
@@ -64,13 +64,13 @@ def _seed_artist(db, aid, name, **tags):
         conn.commit()
 
 
-def _seed_plays(db, artist, title, album, month, count, year=2025):
+def _seed_plays(db, artist, title, album, month, count, year=2025, profile_id=None):
     with db._get_connection() as conn:
         for _ in range(count):
             conn.execute(
-                "INSERT INTO listening_history (artist, title, album, played_at)"
-                " VALUES (?, ?, ?, ?)",
-                (artist, title, album, f"{year}-{month:02d}-15T12:00:00"))
+                "INSERT INTO listening_history (artist, title, album, played_at, profile_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (artist, title, album, f"{year}-{month:02d}-15T12:00:00", profile_id))
         conn.commit()
 
 
@@ -93,6 +93,21 @@ class TestRewind:
         names = [r['track_name'] for r in rows]
         assert names == ['Praying']
         assert rows[0]['popularity'] == 65  # 60 + 5 plays
+
+    def test_profile_id_scopes_to_that_profiles_own_plays(self, db):
+        # M01: a profile_id filter must see ONLY its own attributed rows -
+        # never blended with another profile's plays or the unattributed
+        # (NULL) shared pool, even when they're plainly the louder signal.
+        _seed_plays(db, 'Kid Artist', 'Wheels', 'Kids', month=7, count=50, profile_id=2)
+        _seed_plays(db, 'Kesha', 'Praying', 'Rainbow', month=7, count=3, profile_id=1)
+        _seed_plays(db, 'Unattributed', 'Old Play', 'Legacy', month=7, count=99, profile_id=None)
+
+        rows = sv.rewind_tracks(db, [6, 7, 8], profile_id=1)
+        names = [r['track_name'] for r in rows]
+        assert names == ['Praying']
+
+        rows2 = sv.rewind_tracks(db, [6, 7, 8], profile_id=2)
+        assert [r['track_name'] for r in rows2] == ['Wheels']
 
     def test_diversifies_past_heavy_rotation(self, db):
         # ten tracks by one artist, one track by another: the cap keeps

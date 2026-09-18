@@ -20,16 +20,24 @@ WEB_PLAYER_SOURCE = "soulsync_web"
 
 
 def build_play_event(track: Dict[str, Any], played_at: str,
-                     duration_ms: int = 0) -> Optional[Dict[str, Any]]:
+                     duration_ms: int = 0,
+                     profile_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """Normalize a player track payload into a listening_history event.
 
     ``played_at`` MUST be supplied by the caller (an ISO timestamp string) —
     this module never reads the clock, so it stays pure/testable. Returns None
     when there's nothing worth logging (no title), so callers can skip cleanly.
 
+    ``profile_id`` is the one thing this event knows for certain about WHO
+    played it - the web player runs inside a session that already identifies
+    the profile, unlike a media-server poll that has to guess from account
+    links. Callers pass ``core.profile_context.get_current_profile_id()``;
+    pure/unit tests can leave it None to record an unattributed play, same as
+    every row before this field existed.
+
     The event shape matches insert_listening_events():
       track_id, title, artist, album, played_at, duration_ms, server_source,
-      db_track_id.
+      db_track_id, profile_id.
     """
     if not isinstance(track, dict):
         return None
@@ -52,6 +60,7 @@ def build_play_event(track: Dict[str, Any], played_at: str,
         "duration_ms": int(duration_ms) if _is_int_like(duration_ms) else 0,
         "server_source": WEB_PLAYER_SOURCE,
         "db_track_id": db_track_id,
+        "profile_id": profile_id,
     }
 
 

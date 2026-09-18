@@ -101,6 +101,64 @@ def _hydrate_seasonal_tracks(db, season_key: str, source: str, track_ids: List[s
     ]
 
 
+def _profile_rewind_tracks(deps: Any, seasonal_service: Any, db: Any, variant: str,
+                           limit: int) -> List[Track]:
+    """Live, per-profile rewind leg (M01) - the ONE part of the seasonal mix
+    that is personal taste rather than a library/discovery fact, so unlike
+    the rest of the pool it is computed fresh per generation instead of
+    pre-baked into the shared ``seasonal_tracks`` pool by the background
+    sweep. Returns [] whenever there is nothing personal to add: a
+    keyword-only season (halloween/christmas never had a rewind leg),
+    listening history that isn't profile-attributed on this install, or a
+    profile that hasn't linked a Jellyfin user - all of which fall back to
+    exactly the pre-existing shared behaviour rather than an empty playlist.
+    """
+    try:
+        from core.seasonal_vibes import VIBE_SEASONS, real_months_for, rewind_tracks
+    except Exception:
+        return []
+    if variant not in VIBE_SEASONS:
+        return []
+
+    from core.profile_context import get_current_profile_id
+    profile_id = get_current_profile_id()
+    try:
+        if db.listening_history_scope() != 'profile':
+            return []
+        linked = db.get_profiles_with_jellyfin_user()
+    except Exception:
+        return []
+    if not any(link.get('profile_id') == profile_id for link in linked):
+        return []
+
+    try:
+        from core.seasonal_discovery import SEASONAL_CONFIG
+        season_config = SEASONAL_CONFIG.get(variant)
+        if not season_config:
+            return []
+        holiday = variant == 'valentines'
+        months = real_months_for(
+            season_config['active_months'], seasonal_service._get_hemisphere(), holiday)
+        rewind = rewind_tracks(db, months, limit=limit, profile_id=profile_id)
+        return [Track.from_dict(t) for t in rewind]
+    except Exception:
+        return []
+
+
+def _dedupe_tracks(tracks: List[Track]) -> List[Track]:
+    """First occurrence wins - used to let personal rewind tracks lead
+    without duplicating anything the shared pool also surfaced."""
+    seen = set()
+    out = []
+    for t in tracks:
+        key = t.primary_id() or (t.track_name.lower(), t.artist_name.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
 def generate(deps: Any, variant: str, config: PlaylistConfig) -> List[Track]:
     if not variant:
         raise ValueError('Seasonal Mix requires a season variant')
@@ -108,7 +166,10 @@ def generate(deps: Any, variant: str, config: PlaylistConfig) -> List[Track]:
     db = _resolve_database(deps)
     source = _resolve_active_source(deps)
     track_ids = seasonal_service.get_curated_seasonal_playlist(variant, source=source) or []
-    tracks = _hydrate_seasonal_tracks(db, variant, source, track_ids)
+    pool_tracks = _hydrate_seasonal_tracks(db, variant, source, track_ids)
+
+    personal = _profile_rewind_tracks(deps, seasonal_service, db, variant, config.limit)
+    tracks = _dedupe_tracks(personal + pool_tracks) if personal else pool_tracks
     return tracks[:config.limit]
 
 

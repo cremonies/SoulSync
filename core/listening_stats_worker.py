@@ -159,8 +159,39 @@ class ListeningStatsWorker:
             logger.warning(f"No client available for active server: {active_server}")
             return
 
-        # Step 1: Fetch play history
+        # Step 1: Fetch play history.
+        #
+        # Jellyfin profiles that have linked their own Jellyfin user get
+        # polled and attributed INDIVIDUALLY first (M01) - the admin key can
+        # read any user's history the same way the curation-signals sweep
+        # already reads any user's favourites. Their events carry profile_id.
+        #
+        # The shared/default poll ALWAYS still runs too and always writes
+        # profile_id=NULL: it is what covers Plex, Navidrome, and any
+        # Jellyfin account nobody linked to a profile. Running the
+        # per-profile polls first means a play that both passes catch is
+        # attributed - INSERT OR IGNORE keeps whichever row landed first,
+        # and (track_id, played_at, server_source) doesn't include profile_id,
+        # so the unattributed duplicate is simply ignored, not a double-count.
         self.current_item = f"Fetching play history from {active_server}..."
+        if active_server == 'jellyfin':
+            try:
+                linked_profiles = self.db.get_profiles_with_jellyfin_user()
+            except Exception as e:
+                logger.debug(f"Could not read per-profile Jellyfin links: {e}")
+                linked_profiles = []
+            for link in linked_profiles:
+                try:
+                    profile_history = client.get_play_history(
+                        limit=500, user_id=link['jellyfin_user_id'])
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to fetch Jellyfin play history for profile "
+                        f"{link['profile_id']}: {e}")
+                    continue
+                self._ingest_play_history(
+                    profile_history, active_server, profile_id=link['profile_id'])
+
         try:
             history = client.get_play_history(limit=500)
         except Exception as e:
@@ -168,35 +199,7 @@ class ListeningStatsWorker:
             self.stats['errors'] += 1
             return
 
-        if history:
-            # Convert to DB format
-            events = []
-            for entry in history:
-                if not entry.get('played_at'):
-                    continue
-                events.append({
-                    'track_id': entry.get('track_id', ''),
-                    'title': entry.get('track_title', ''),
-                    'artist': entry.get('artist', ''),
-                    'album': entry.get('album', ''),
-                    'played_at': entry.get('played_at'),
-                    'duration_ms': entry.get('duration_ms', 0),
-                    'server_source': active_server,
-                    # db_track_id filled in below by a single batched lookup
-                    'db_track_id': None,
-                })
-
-            # Batch-resolve track IDs for all events at once (was N+1 before).
-            id_map = self._resolve_db_track_ids_batch(events)
-            for ev in events:
-                title_l = (ev.get('title') or '').strip().lower()
-                artist_l = (ev.get('artist') or '').strip().lower()
-                if title_l:
-                    ev['db_track_id'] = id_map.get((title_l, artist_l))
-
-            inserted = self.db.insert_listening_events(events)
-            self.stats['events_added'] += inserted
-            logger.info(f"Inserted {inserted} new listening events (of {len(events)} total)")
+        self._ingest_play_history(history, active_server, profile_id=None)
 
         # Step 2: Fetch play counts and update tracks table
         self.current_item = f"Updating play counts from {active_server}..."
@@ -470,6 +473,49 @@ class ListeningStatsWorker:
         finally:
             if conn:
                 conn.close()
+
+    def _ingest_play_history(self, history, server_source, profile_id=None):
+        """Convert raw ``get_play_history()`` rows into events and insert them.
+
+        Shared by the default/unattributed poll and each per-profile Jellyfin
+        poll - same conversion and batched track-id resolution either way,
+        just a different ``profile_id`` stamped on every row.
+        """
+        if not history:
+            return
+        events = []
+        for entry in history:
+            if not entry.get('played_at'):
+                continue
+            events.append({
+                'track_id': entry.get('track_id', ''),
+                'title': entry.get('track_title', ''),
+                'artist': entry.get('artist', ''),
+                'album': entry.get('album', ''),
+                'played_at': entry.get('played_at'),
+                'duration_ms': entry.get('duration_ms', 0),
+                'server_source': server_source,
+                # db_track_id filled in below by a single batched lookup
+                'db_track_id': None,
+                'profile_id': profile_id,
+            })
+
+        if not events:
+            return
+
+        # Batch-resolve track IDs for all events at once (was N+1 before).
+        id_map = self._resolve_db_track_ids_batch(events)
+        for ev in events:
+            title_l = (ev.get('title') or '').strip().lower()
+            artist_l = (ev.get('artist') or '').strip().lower()
+            if title_l:
+                ev['db_track_id'] = id_map.get((title_l, artist_l))
+
+        inserted = self.db.insert_listening_events(events)
+        self.stats['events_added'] += inserted
+        logger.info(
+            f"Inserted {inserted} new listening events (of {len(events)} total)"
+            + (f" for profile {profile_id}" if profile_id is not None else ""))
 
     def _resolve_db_track_ids_batch(self, events):
         """Batch-resolve DB track IDs for a list of history events.

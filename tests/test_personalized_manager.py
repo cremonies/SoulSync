@@ -299,6 +299,26 @@ class TestRefreshPlaylist:
         persisted = mgr.get_playlist_tracks(r2.id)
         assert [t.track_name for t in persisted] == ['A', 'B', 'C']
 
+    def test_generator_sees_the_target_profile_via_background_context(self, db, registry):
+        # M01: refresh_playlist must declare the profile it's generating FOR
+        # (core.profile_context) so a generator's live per-profile queries
+        # (seasonal_mix's rewind leg) see the right profile with no request
+        # context to fall back on - and must clear it afterward so the next
+        # call for a different profile isn't contaminated by the last one.
+        from core.profile_context import get_current_profile_id
+        seen = {}
+
+        def gen(deps, variant, config):
+            seen['profile_id'] = get_current_profile_id()
+            return [_make_track('S1')]
+
+        _register_simple_kind(registry, gen)
+        mgr = PersonalizedPlaylistManager(db, deps=None, registry=registry)
+        mgr.refresh_playlist('hidden_gems', '', profile_id=7)
+        assert seen['profile_id'] == 7
+        # background override must not leak past the call
+        assert get_current_profile_id() == 1
+
     def test_generator_exception_preserves_previous_snapshot(self, db, registry):
         run = {'mode': 'success'}
 

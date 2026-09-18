@@ -10172,11 +10172,12 @@ def library_log_play():
     """
     try:
         from core.playback.play_log import build_play_event
+        from core.profile_context import get_current_profile_id
         data = request.get_json(silent=True) or {}
         track = data.get('track') or data
         played_at = datetime.now().isoformat()
         duration_ms = data.get('duration_ms', 0)
-        event = build_play_event(track, played_at, duration_ms)
+        event = build_play_event(track, played_at, duration_ms, profile_id=get_current_profile_id())
         if not event:
             return jsonify({"success": False, "skipped": True}), 200
         get_database().record_web_player_play(event)

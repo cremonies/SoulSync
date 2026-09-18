@@ -21,7 +21,15 @@ def test_library_track_full_event():
         "duration_ms": 237000,
         "server_source": WEB_PLAYER_SOURCE,
         "db_track_id": 4321,
+        "profile_id": None,
     }
+
+
+def test_profile_id_passthrough():
+    # The caller supplies the active profile (core.profile_context); this
+    # module never resolves it itself, same as it never reads the clock.
+    ev = build_play_event({"id": 1, "title": "T"}, TS, profile_id=2)
+    assert ev["profile_id"] == 2
 
 
 def test_int_string_id_is_db_track_id():

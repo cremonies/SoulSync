@@ -1141,18 +1141,25 @@ class JellyfinClient(MediaServerClient):
             logger.error(f"Error getting library stats: {e}")
             return {}
     
-    def get_play_history(self, limit=500):
-        """Fetch recently played tracks for the active user.
+    def get_play_history(self, limit=500, user_id=None):
+        """Fetch recently played tracks for a user.
+
+        ``user_id`` overrides the client's own connected account - lets a
+        caller with the admin key read a SPECIFIC user's history (same
+        admin-impersonation the curation-signals sweep already relies on)
+        instead of only ever seeing whichever account this client logged in
+        as. Defaults to ``self.user_id`` so every existing caller is unchanged.
 
         Returns list of dicts with: track_title, artist, album, played_at,
         duration_ms, track_id.
         """
-        if not self.ensure_connection() or not self.user_id:
+        target_user = user_id or self.user_id
+        if not self.ensure_connection() or not target_user:
             return []
 
         try:
             params = {
-                'UserId': self.user_id,
+                'UserId': target_user,
                 'IncludeItemTypes': 'Audio',
                 'SortBy': 'DatePlayed',
                 'SortOrder': 'Descending',
@@ -1164,7 +1171,7 @@ class JellyfinClient(MediaServerClient):
             if self.music_library_id:
                 params['ParentId'] = self.music_library_id
 
-            response = self._make_request(f'/Users/{self.user_id}/Items', params)
+            response = self._make_request(f'/Users/{target_user}/Items', params)
             if not response or 'Items' not in response:
                 return []
 

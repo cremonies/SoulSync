@@ -84,15 +84,27 @@ def real_months_for(active_months: List[int], hemisphere: str, holiday: bool) ->
     return list(active_months)
 
 
-def rewind_tracks(database, months: List[int], limit: int = 60) -> List[Dict[str, Any]]:
+def rewind_tracks(database, months: List[int], limit: int = 60,
+                  profile_id: Optional[int] = None) -> List[Dict[str, Any]]:
     """the user's most-played tracks during these calendar months, any year.
     art and duration come from the library when the track is owned.
 
     the library lookup pre-filters by the candidate ARTISTS: a naive
     per-track LOWER() match scans 300k tracks per candidate and never
-    finishes on a real install."""
+    finishes on a real install.
+
+    ``profile_id``, when given, scopes the window to that profile's OWN
+    attributed plays only (M01) - never blended with unattributed/shared
+    rows, so a profile with real personal history doesn't get someone
+    else's plays quietly mixed back in. Pass None for the pre-existing
+    shared/install-wide behaviour; the caller decides which applies (see
+    ``seasonal_mix.generate``) since an unlinked profile has no attributed
+    rows to scope to and must keep getting the shared window instead of a
+    permanently-empty one."""
     try:
         placeholders = ",".join("?" for _ in months)
+        profile_clause = " AND profile_id = ?" if profile_id is not None else ""
+        params = list(months) + ([profile_id] if profile_id is not None else [])
         with database._get_connection() as conn:
             cursor = conn.cursor()
             # fetch deep, then diversify: the raw top of the window is a
@@ -103,11 +115,11 @@ def rewind_tracks(database, months: List[int], limit: int = 60) -> List[Dict[str
                 FROM listening_history
                 WHERE CAST(strftime('%m', played_at) AS INTEGER) IN ({placeholders})
                   AND artist IS NOT NULL AND artist != ''
-                  AND title IS NOT NULL AND title != ''
+                  AND title IS NOT NULL AND title != ''{profile_clause}
                 GROUP BY LOWER(artist), LOWER(title)
                 ORDER BY plays DESC
                 LIMIT 400
-            """, months)
+            """, params)
             candidates = cursor.fetchall()
             per_artist_seen: Dict[str, int] = {}
             plays_rows = []

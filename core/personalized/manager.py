@@ -186,12 +186,23 @@ class PersonalizedPlaylistManager:
         if config_overrides:
             config = config.merged(config_overrides)
 
+        # Declare which profile this generation is for via the same
+        # background-profile mechanism the automation engine uses (M01):
+        # generators that care (seasonal_mix's rewind leg) read it back with
+        # core.profile_context.get_current_profile_id() instead of the
+        # opaque `deps` needing a profile_id field every generator must
+        # know to ignore.
+        from core.profile_context import reset_background_profile, set_background_profile
+        token = set_background_profile(profile_id)
         try:
-            tracks = spec.generator(self.deps, variant, config)
-        except Exception as exc:  # noqa: BLE001 — record + re-raise after persisting
-            logger.exception("Generator failed for kind=%s variant=%s: %s", kind, variant, exc)
-            self._record_generation_failure(record.id, str(exc))
-            return self._fetch_playlist_row(kind, variant, profile_id)  # type: ignore[return-value]
+            try:
+                tracks = spec.generator(self.deps, variant, config)
+            except Exception as exc:  # noqa: BLE001 — record + re-raise after persisting
+                logger.exception("Generator failed for kind=%s variant=%s: %s", kind, variant, exc)
+                self._record_generation_failure(record.id, str(exc))
+                return self._fetch_playlist_row(kind, variant, profile_id)  # type: ignore[return-value]
+        finally:
+            reset_background_profile(token)
 
         # Quality post-filters — applied uniformly to every kind so
         # generators stay focused on selection logic, not staleness
