@@ -21,7 +21,7 @@ interface MaService {
   brand: string;
   logo: string;
   dark?: boolean;
-  type?: 'token';
+  type?: 'token' | 'username';
   saveUrl?: string;
   hint?: string;
   connect?: (pid: number) => string;
@@ -46,6 +46,13 @@ const _MA_SERVICES: MaService[] = [
     type: 'token',
     saveUrl: '/api/profiles/me/listenbrainz',
     hint: 'Paste your token from listenbrainz.org/profile',
+  },
+  {
+    id: 'lastfm', name: 'Last.fm', brand: '#d51007', dark: true,
+    logo: '/static/img/brands/lastfm.png',
+    type: 'username',
+    saveUrl: '/api/profiles/me/lastfm',
+    hint: 'Your Last.fm username - imports scrobbles from any app you use it with',
   },
 ];
 
@@ -136,9 +143,11 @@ function _maRender(body: HTMLElement | null, data: MaConnections): void {
       action = `
                 <span class="ma-account">${escapeHtml(c.account || 'Connected')}</span>
                 <button class="ma-btn ma-btn--ghost" onclick="disconnectMyAccount('${svc.id}')">Disconnect</button>`;
-    } else if (svc.type === 'token') {
+    } else if (svc.type === 'token' || svc.type === 'username') {
+      const inputType = svc.type === 'token' ? 'password' : 'text';
+      const placeholder = svc.type === 'token' ? 'Paste token' : 'Your username';
       action = `
-                <input type="password" class="ma-token-input" id="ma-token-${svc.id}" placeholder="Paste token"
+                <input type="${inputType}" class="ma-token-input" id="ma-token-${svc.id}" placeholder="${placeholder}"
                        title="${escapeHtml(svc.hint || '')}">
                 <button class="ma-btn ma-btn--connect" onclick="saveMyAccountToken('${svc.id}')">Save</button>`;
     } else {
@@ -181,15 +190,16 @@ export async function saveMyAccountToken(serviceId: string): Promise<void> {
   const svc = _MA_SERVICES.find((s) => s.id === serviceId);
   if (!svc || !svc.saveUrl) return;
   const input = document.getElementById(`ma-token-${serviceId}`) as HTMLInputElement | null;
-  const token = ((input && input.value) || '').trim();
-  if (!token) {
-    toast('Paste a token first', 'info');
+  const value = ((input && input.value) || '').trim();
+  if (!value) {
+    toast(svc.type === 'username' ? 'Enter a username first' : 'Paste a token first', 'info');
     return;
   }
+  const bodyKey = svc.type === 'username' ? 'username' : 'token';
   try {
     const res = await fetch(svc.saveUrl, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ [bodyKey]: value }),
     });
     const data = (await res.json()) as { success?: boolean; error?: string };
     if (data.success) {

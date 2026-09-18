@@ -355,6 +355,41 @@ def test_listenbrainz_connection_status_and_disconnect(client, nonadmin_profile)
     assert client.get('/api/profiles/me/connections').get_json()['connections']['listenbrainz']['connected'] is False
 
 
+# ── Last.fm: per-profile username (no token - the recent-tracks API is public) ─
+
+def test_lastfm_connection_status_save_and_disconnect(client, nonadmin_profile):
+    with client.session_transaction() as sess:
+        sess['profile_id'] = nonadmin_profile
+    # unconnected
+    conns = client.get('/api/profiles/me/connections').get_json()['connections']
+    assert 'lastfm' in conns and conns['lastfm']['connected'] is False
+
+    # save via the My Accounts endpoint
+    r = client.post('/api/profiles/me/lastfm', json={'username': 'my-lastfm-name'})
+    assert r.get_json() == {'success': True, 'username': 'my-lastfm-name'}
+    conns = client.get('/api/profiles/me/connections').get_json()['connections']
+    assert conns['lastfm']['connected'] is True
+    assert conns['lastfm']['account'] == 'my-lastfm-name'
+
+    # a blank username is rejected, not silently accepted as "connected"
+    r = client.post('/api/profiles/me/lastfm', json={'username': '   '})
+    assert r.status_code == 400 and r.get_json()['success'] is False
+
+    # disconnect via the generic endpoint
+    assert client.post('/api/profiles/me/connections/lastfm/disconnect').get_json()['success']
+    assert client.get('/api/profiles/me/connections').get_json()['connections']['lastfm']['connected'] is False
+
+
+def test_lastfm_get_status_endpoint(client, nonadmin_profile):
+    with client.session_transaction() as sess:
+        sess['profile_id'] = nonadmin_profile
+    assert client.get('/api/profiles/me/lastfm').get_json() == {
+        'success': True, 'connected': False, 'username': None}
+    client.post('/api/profiles/me/lastfm', json={'username': 'someone'})
+    assert client.get('/api/profiles/me/lastfm').get_json() == {
+        'success': True, 'connected': True, 'username': 'someone'}
+
+
 # ── Background profile context drives get_current_profile_id() (part 1) ────────
 
 def test_background_profile_override_when_no_request():

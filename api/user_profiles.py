@@ -152,6 +152,21 @@ def _profile_listenbrainz_connection(profile_id):
     return (False, None)
 
 
+def _profile_lastfm_connection(profile_id):
+    """(connected, username) for a profile's OWN Last.fm username. Unlike
+    ListenBrainz, there's no token to validate — Last.fm's recent-tracks API
+    is public, so a saved username IS the connection."""
+    if not profile_id or profile_id == 1:
+        return (False, None)
+    try:
+        username = get_database().get_profile_lastfm_username(profile_id)
+        if username:
+            return (True, username)
+    except Exception as e:
+        logger.debug("profile %s lastfm connection check failed: %s", profile_id, e)
+    return (False, None)
+
+
 def _disconnect_profile_spotify(pid):
     cache_path = f"config/.spotify_cache_profile_{pid}"
     try:
@@ -181,10 +196,18 @@ def _disconnect_profile_listenbrainz(pid):
         logger.debug("could not clear profile listenbrainz: %s", e)
 
 
+def _disconnect_profile_lastfm(pid):
+    try:
+        get_database().set_profile_lastfm_username(pid, None)
+    except Exception as e:
+        logger.debug("could not clear profile lastfm username: %s", e)
+
+
 _PROFILE_DISCONNECTORS = {
     'spotify': _disconnect_profile_spotify,
     'tidal': _disconnect_profile_tidal,
     'listenbrainz': _disconnect_profile_listenbrainz,
+    'lastfm': _disconnect_profile_lastfm,
 }
 
 
@@ -829,6 +852,48 @@ def test_profile_listenbrainz():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@bp.route('/api/profiles/me/lastfm', methods=['GET'])
+def get_profile_lastfm():
+    """Get current profile's Last.fm username."""
+    try:
+        profile_id = get_current_profile_id()
+        username = get_database().get_profile_lastfm_username(profile_id)
+        return jsonify({'success': True, 'connected': bool(username), 'username': username})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@bp.route('/api/profiles/me/lastfm', methods=['POST'])
+def save_profile_lastfm():
+    """Save this profile's Last.fm username. No token to validate - Last.fm's
+    recent-tracks API is public, so any non-blank username is accepted; a
+    typo just means an empty import next run rather than a rejected save."""
+    try:
+        data = request.json or {}
+        username = (data.get('username') or '').strip()
+        if not username:
+            return jsonify({'success': False, 'error': 'Username is required'}), 400
+
+        profile_id = get_current_profile_id()
+        success = get_database().set_profile_lastfm_username(profile_id, username)
+        if success:
+            return jsonify({'success': True, 'username': username})
+        return jsonify({'success': False, 'error': 'Failed to save username'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@bp.route('/api/profiles/me/lastfm', methods=['DELETE'])
+def delete_profile_lastfm():
+    """Clear this profile's Last.fm username."""
+    try:
+        profile_id = get_current_profile_id()
+        get_database().set_profile_lastfm_username(profile_id, None)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @bp.route('/api/profiles/me/connections', methods=['GET'])
 def get_my_connections():
     """Per-profile playlist-service connection status for the My Accounts modal.
@@ -838,6 +903,7 @@ def get_my_connections():
         sp_connected, sp_account = _profile_spotify_connection(pid)
         td_connected, td_account = _profile_tidal_connection(pid)
         lb_connected, lb_account = _profile_listenbrainz_connection(pid)
+        lfm_connected, lfm_account = _profile_lastfm_connection(pid)
         return jsonify({
             'success': True,
             'is_admin': pid == 1,
@@ -845,6 +911,7 @@ def get_my_connections():
                 'spotify': {'connected': sp_connected, 'account': sp_account},
                 'tidal': {'connected': td_connected, 'account': td_account},
                 'listenbrainz': {'connected': lb_connected, 'account': lb_account},
+                'lastfm': {'connected': lfm_connected, 'account': lfm_account},
             },
         })
     except Exception as e:
