@@ -305,7 +305,11 @@ def _qs_metadata_sources():
     return sources
 _QS_MEDIA_SERVERS = ['plex', 'jellyfin', 'navidrome', 'soulsync']
 # Single download sources (everything the mode accepts except 'hybrid').
-_QS_DOWNLOAD_SOURCES = ['soulseek', 'youtube', 'tidal', 'qobuz', 'hifi', 'torrent', 'usenet']
+# Mirrors HYBRID_SOURCES (settings.js) — this list drifted behind it before,
+# which is why the quick-switch modal's "Single source" tab had no Deezer/
+# Amazon/Lidarr/SoundCloud card even though Settings → Downloads supported
+# picking any of them as the sole source.
+_QS_DOWNLOAD_SOURCES = ['soulseek', 'youtube', 'tidal', 'qobuz', 'hifi', 'deezer_dl', 'amazon', 'lidarr', 'soundcloud', 'torrent', 'usenet']
 
 
 def _qs_metadata_available(source):
