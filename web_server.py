@@ -20721,6 +20721,18 @@ def _emit_chat_push_loop():
         try:
             if not _has_connected_clients():
                 continue
+            # Soulseek not in play (not the primary source, not in the hybrid
+            # chain) → slskd is likely not even running, so skip rather than
+            # hammer a dead endpoint every 6s. Same relevance check the status
+            # probe above already uses to skip pinging slskd needlessly.
+            download_mode = config_manager.get('download_source.mode', 'hybrid')
+            hybrid_order = config_manager.get('download_source.hybrid_order', ['hifi', 'youtube', 'soulseek'])
+            if isinstance(hybrid_order, str):
+                hybrid_order = [hybrid_order]
+            soulseek_relevant = (download_mode == 'soulseek' or
+                                (download_mode == 'hybrid' and 'soulseek' in hybrid_order))
+            if not soulseek_relevant:
+                continue
             _slsk = download_orchestrator.client("soulseek") if download_orchestrator else None
             if not _slsk or not _slsk.base_url:
                 continue

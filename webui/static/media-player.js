@@ -1676,6 +1676,32 @@ function npScheduleQueuePrefetch() {
     }, 80);
 }
 
+// Auto-download is off (or the track has no full-download source at all) —
+// fetch a short stream preview instead of just skipping the queue item. Same
+// endpoint playTrackByMetadata's fallback uses for a single-row play, so this
+// gets whatever startStream() otherwise plays for an unowned track: a Deezer
+// preview clip when stream_source is 'deezer_preview', a YouTube match
+// otherwise.
+async function npFetchStreamPreview(track) {
+    try {
+        const response = await fetch('/api/enhanced-search/stream-track', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                track_name: track.title || track.name || '',
+                artist_name: track.artist || track.artist_name || '',
+                album_name: track.album || '',
+                duration_ms: 0,
+            }),
+        });
+        const data = await response.json();
+        return (data?.success && data.result) ? data.result : null;
+    } catch (error) {
+        console.warn('Preview lookup failed:', error.message);
+        return null;
+    }
+}
+
 async function npEnsureQueueTrackReady(track, isCurrent = () => true) {
     if (track?.file_path) return track;
     if (!npAutoDownloadQueue) throw new Error('Auto-download is disabled for missing queue tracks');
@@ -2624,12 +2650,26 @@ async function playQueueItem(index, options = {}) {
             });
             showLoadingAnimation();
             const loadingText = document.querySelector('.loading-text');
-            if (loadingText) loadingText.textContent = 'Downloading queued track…';
             renderNpQueue();
-            await npEnsureQueueTrackReady(track, isCurrent);
-            if (!isCurrent()) return { status: 'superseded' };
-            track.is_library = true;
-            if (loadingText) loadingText.textContent = 'Loading track…';
+            if (npAutoDownloadQueue) {
+                if (loadingText) loadingText.textContent = 'Downloading queued track…';
+                await npEnsureQueueTrackReady(track, isCurrent);
+                if (!isCurrent()) return { status: 'superseded' };
+                track.is_library = true;
+                if (loadingText) loadingText.textContent = 'Loading track…';
+            } else {
+                // Auto-download is off — try a 30s-ish stream preview rather
+                // than throwing "Auto-download is disabled" and skipping.
+                if (loadingText) loadingText.textContent = 'Fetching preview…';
+                const preview = await npFetchStreamPreview(track);
+                if (!isCurrent()) return { status: 'superseded' };
+                if (!preview) throw new Error('Not in your library and no preview available');
+                await startStream(preview);
+                if (!isCurrent()) return { status: 'superseded' };
+                renderNpQueue();
+                updateNpPrevNextButtons();
+                return { status: 'preview' };
+            }
         }
         if (track.is_library) {
             const previousSetup = npPlaybackSetup;

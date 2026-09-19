@@ -173,6 +173,22 @@ def test_admin_sets_global_active_sources(client):
     assert dl['mode'] == 'hybrid' and dl['hybrid_order'] == ['hifi', 'soulseek']
 
 
+def test_single_download_source_options_include_every_hybrid_source(client):
+    # _QS_DOWNLOAD_SOURCES (the quick-switch modal's "Single source" list) once
+    # drifted behind HYBRID_SOURCES (settings.js) and silently dropped Deezer/
+    # Amazon/Lidarr/SoundCloud as selectable single sources. Every id the
+    # Settings → Downloads chain widget can place solo must stay selectable here.
+    ids = {o['id'] for o in client.get('/api/profiles/me/active-sources').get_json()['download']['options']}
+    assert {'soulseek', 'youtube', 'tidal', 'qobuz', 'hifi', 'deezer_dl', 'amazon',
+            'lidarr', 'soundcloud', 'torrent', 'usenet'} <= ids
+
+
+def test_deezer_selectable_as_single_download_source(client):
+    resp = client.post('/api/profiles/active-sources', json={'download_mode': 'deezer_dl'})
+    assert resp.get_json()['success']
+    assert client.get('/api/profiles/me/active-sources').get_json()['download']['mode'] == 'deezer_dl'
+
+
 def test_admin_can_set_jiosaavn_as_primary_metadata_source(client):
     from core.settings import config_manager
     config_manager.set('experimental.jiosaavn_enabled', True)
