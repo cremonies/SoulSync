@@ -69,6 +69,29 @@ class PrepareStreamDeps:
         self._set_stream_state(value)
 
 
+def fetch_preview_url_to_stream_folder(preview_url: str, filename: str, stream_folder: str) -> str:
+    """Fetch a small, already-public direct URL (Deezer's 30-second preview
+    clip) straight into the Stream folder. No queueing, no polling, no
+    download-orchestrator involvement — the file is public and tiny, so a
+    single synchronous GET is the whole job. Returns the saved path.
+
+    Raises on any HTTP/network failure; the caller turns that into the
+    normal stream_state error path.
+    """
+    import requests
+
+    safe_name = "".join(c for c in filename if c not in '<>:"/\\|?*') or "preview.mp3"
+    if not safe_name.lower().endswith(('.mp3', '.m4a', '.aac')):
+        safe_name += '.mp3'
+    dest_path = os.path.join(stream_folder, safe_name)
+
+    response = requests.get(preview_url, timeout=15)
+    response.raise_for_status()
+    with open(dest_path, 'wb') as f:
+        f.write(response.content)
+    return dest_path
+
+
 def prepare_stream_task(track_data, deps: PrepareStreamDeps):
     """
     Background streaming task that downloads track to Stream folder and updates global state.
@@ -110,7 +133,35 @@ def prepare_stream_task(track_data, deps: PrepareStreamDeps):
                 logger.info(f"Cleared old stream file: {existing_file}")
             except Exception as e:
                 logger.error(f"Could not remove existing stream file: {e}")
-        
+
+        # Direct-URL fast path: a small, already-public file (currently
+        # Deezer's own 30-second preview clip) needs no download-orchestrator
+        # queueing/polling at all — just fetch it and mark ready. Keeps the
+        # "Play" preview instant instead of running a full track download
+        # through whatever source happens to be active.
+        if track_data.get('result_type') == 'preview_url' and track_data.get('preview_url'):
+            try:
+                stream_path = fetch_preview_url_to_stream_folder(
+                    track_data['preview_url'],
+                    track_data.get('filename') or 'preview.mp3',
+                    stream_folder,
+                )
+                with deps.stream_lock:
+                    deps.stream_state.update({
+                        "status": "ready",
+                        "progress": 100,
+                        "file_path": stream_path,
+                    })
+                logger.info(f"Preview stream ready for playback: {stream_path}")
+            except Exception as e:
+                logger.error(f"Error fetching preview stream: {e}")
+                with deps.stream_lock:
+                    deps.stream_state.update({
+                        "status": "error",
+                        "error_message": f"Failed to fetch preview: {e}",
+                    })
+            return
+
         # Start the download using the same mechanism as regular downloads
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)

@@ -6628,6 +6628,7 @@
                                                         <label>Stream / Preview Source:</label>
                                                         <select id="stream-source" class="form-select">
                                                             <option value="youtube">YouTube (Instant)</option>
+                                                            <option value="deezer_preview">Deezer Preview (30s, instant)</option>
                                                             <option value="active">Active Download Source</option>
                                                         </select>
                                                         <span class="info-icon" role="button" tabindex="0"
@@ -6636,6 +6637,9 @@
                                                         <div class="setting-help-text setting-help-body" hidden>
                                                             Where to stream audio when previewing tracks. YouTube is
                                                             instant and requires no setup.
+                                                            "Deezer Preview" fetches Deezer's own public 30-second clip
+                                                            directly — no login, no queueing, no full download, just
+                                                            the short preview.
                                                             "Active Download Source" uses your configured source (Tidal,
                                                             Qobuz, etc.) — if that's Soulseek, YouTube is used
                                                             automatically.

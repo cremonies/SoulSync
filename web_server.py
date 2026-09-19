@@ -5888,6 +5888,7 @@ def stream_enhanced_search_track():
             download_orchestrator=download_orchestrator,
             matching_engine=matching_engine,
             run_async=run_async,
+            deezer_client_getter=_get_deezer_client,
         )
         if result is None:
             return jsonify({
