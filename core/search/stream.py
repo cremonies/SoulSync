@@ -69,9 +69,14 @@ def _deezer_preview_result(artist_name: str, track_name: str, deezer_client) -> 
     preview clip as a stream result, or None when there's no match or no
     preview URL (some regions/tracks omit it).
 
-    Tries the exact title first, then a version-marker-stripped variant —
-    same "(Radio Edit)"/"[Live]" cleaning the Soulseek/YouTube queries use,
-    since Deezer's own title field almost never carries those suffixes.
+    Uses ``search_tracks(track=, artist=)`` rather than the older, stricter
+    ``search_track`` — it already carries an advanced-query → free-text
+    fallback (``core/deezer_client.py``'s own safety net for brittle
+    exact-phrase filters), the same kind of leniency third-party Deezer
+    search tools rely on. A version-marker-stripped retry ("(Radio Edit)",
+    "[Live]") sits on top as a second layer for the rarer case where even
+    the free-text fallback is thrown off by a suffix Deezer's own title
+    field never carries.
 
     Shaped differently from ``_result_to_dict``'s Soulseek-style dict —
     ``result_type: "preview_url"`` is the signal ``prepare_stream_task``
@@ -88,15 +93,13 @@ def _deezer_preview_result(artist_name: str, track_name: str, deezer_client) -> 
 
     for candidate_title in candidates:
         try:
-            track = deezer_client.search_track(artist_name, candidate_title)
+            tracks = deezer_client.search_tracks(track=candidate_title, artist=artist_name, limit=5)
         except Exception as e:
             logger.warning(f"Deezer preview lookup failed for '{artist_name} - {candidate_title}': {e}")
             continue
-        if not track:
-            continue
-        preview_url = track.get('preview')
+        preview_url = next((t.preview_url for t in (tracks or []) if getattr(t, 'preview_url', None)), None)
         if not preview_url:
-            logger.info(f"Deezer match for '{artist_name} - {candidate_title}' has no preview clip")
+            logger.info(f"No Deezer preview clip for '{artist_name} - {candidate_title}'")
             continue
         return {
             "result_type": "preview_url",
