@@ -51,10 +51,27 @@ def _resolve_effective_stream_mode(config_manager) -> str:
     return download_mode
 
 
+def _strip_version_markers(track_name: str) -> str:
+    """Drop parenthesized/bracketed suffixes ("(Radio Edit)", "[Live]").
+
+    Deezer's own catalog title rarely carries these — a search for the
+    exact "(Radio Edit)"-suffixed title a source track came from routinely
+    comes back empty even though the song itself is on Deezer under its
+    plain title.
+    """
+    cleaned = re.sub(r'\s*\([^)]*\)', '', track_name)
+    cleaned = re.sub(r'\s*\[[^\]]*\]', '', cleaned)
+    return cleaned.strip()
+
+
 def _deezer_preview_result(artist_name: str, track_name: str, deezer_client) -> Optional[dict]:
     """Look up a track on Deezer's public catalog and return its 30-second
     preview clip as a stream result, or None when there's no match or no
     preview URL (some regions/tracks omit it).
+
+    Tries the exact title first, then a version-marker-stripped variant —
+    same "(Radio Edit)"/"[Live]" cleaning the Soulseek/YouTube queries use,
+    since Deezer's own title field almost never carries those suffixes.
 
     Shaped differently from ``_result_to_dict``'s Soulseek-style dict —
     ``result_type: "preview_url"`` is the signal ``prepare_stream_task``
@@ -63,27 +80,35 @@ def _deezer_preview_result(artist_name: str, track_name: str, deezer_client) -> 
     """
     if deezer_client is None:
         return None
-    try:
-        track = deezer_client.search_track(artist_name, track_name)
-    except Exception as e:
-        logger.warning(f"Deezer preview lookup failed for '{artist_name} - {track_name}': {e}")
-        return None
-    if not track:
-        return None
-    preview_url = track.get('preview')
-    if not preview_url:
-        logger.info(f"Deezer match for '{artist_name} - {track_name}' has no preview clip")
-        return None
-    return {
-        "result_type": "preview_url",
-        "preview_url": preview_url,
-        "filename": f"{artist_name} - {track_name} (preview).mp3",
-        "size": 0,
-        "bitrate": 128,
-        "duration": 30,
-        "quality": "preview",
-        "username": "deezer_preview",
-    }
+
+    candidates = [track_name]
+    cleaned = _strip_version_markers(track_name)
+    if cleaned and cleaned.lower() != track_name.lower():
+        candidates.append(cleaned)
+
+    for candidate_title in candidates:
+        try:
+            track = deezer_client.search_track(artist_name, candidate_title)
+        except Exception as e:
+            logger.warning(f"Deezer preview lookup failed for '{artist_name} - {candidate_title}': {e}")
+            continue
+        if not track:
+            continue
+        preview_url = track.get('preview')
+        if not preview_url:
+            logger.info(f"Deezer match for '{artist_name} - {candidate_title}' has no preview clip")
+            continue
+        return {
+            "result_type": "preview_url",
+            "preview_url": preview_url,
+            "filename": f"{artist_name} - {track_name} (preview).mp3",
+            "size": 0,
+            "bitrate": 128,
+            "duration": 30,
+            "quality": "preview",
+            "username": "deezer_preview",
+        }
+    return None
 
 
 def _build_stream_queries(track_name: str, artist_name: str, effective_mode: str) -> list[str]:
@@ -92,19 +117,16 @@ def _build_stream_queries(track_name: str, artist_name: str, effective_mode: str
 
     is_streaming_source = effective_mode in ('youtube', 'tidal', 'qobuz', 'hifi', 'deezer_dl', 'lidarr')
 
+    cleaned_name = _strip_version_markers(track_name)
+
     if is_streaming_source:
         if artist_name and track_name:
             queries.append(f"{artist_name} {track_name}".strip())
-
-        cleaned_name = re.sub(r'\s*\([^)]*\)', '', track_name).strip()
-        cleaned_name = re.sub(r'\s*\[[^\]]*\]', '', cleaned_name).strip()
         if cleaned_name and cleaned_name.lower() != track_name.lower():
             queries.append(f"{artist_name} {cleaned_name}".strip())
     else:
         if track_name.strip():
             queries.append(track_name.strip())
-        cleaned_name = re.sub(r'\s*\([^)]*\)', '', track_name).strip()
-        cleaned_name = re.sub(r'\s*\[[^\]]*\]', '', cleaned_name).strip()
         if cleaned_name and cleaned_name.lower() != track_name.lower():
             queries.append(cleaned_name.strip())
 
