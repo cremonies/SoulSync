@@ -489,26 +489,35 @@ function _searchWishlistTrackManually(artistName, trackName) {
     // holds the soulseek state and its own renders short-circuit, nothing can
     // flip back. Only after ~4s without an icon do we fall back to a manual
     // section swap.
+    //
+    // The icon (from the source-picker's own settings fetch) and
+    // window._searchPageSetQuery (registered by the Search page's own mount
+    // effect) are two INDEPENDENT async initializations with no ordering
+    // guarantee between them. Firing the click as soon as the icon alone
+    // exists races the setter: when the icon wins, the query sync above was
+    // skipped, leaving the box blank on a fresh mount or showing whatever
+    // query a previous visit left behind. Wait for BOTH before clicking.
     let attempts = 0;
     const tryHandoff = () => {
         attempts += 1;
         const soulseekIcon = document.querySelector('#enh-source-row [data-source="soulseek"]');
-        if (soulseekIcon) {
+        const setQueryReady = typeof window._searchPageSetQuery === 'function';
+        if (soulseekIcon && setQueryReady) {
             // Sync the query into the search page BEFORE clicking: the icon
             // click hands off whatever query that page is holding, and it keeps
             // its query across navigation, so without this the wishlist's
             // "search manually" would run the LAST thing searched on /search
             // instead of this track. Same seam downloads.js uses.
-            if (typeof window._searchPageSetQuery === 'function') {
-                window._searchPageSetQuery(query || '');
-            }
+            window._searchPageSetQuery(query || '');
             soulseekIcon.click();
             return;
         }
-        // Keep waiting: the icon row is React-rendered with the page, so it
-        // arrives once the route mounts. There is no manual fallback any more —
-        // the old one swapped #basic-search-section's classes and called
-        // performDownloadsSearch, and React owns both of those now.
+        // Keep waiting: the icon row is React-rendered with the page, and the
+        // setter arrives from the Search page's own mount effect — both show
+        // up once the route mounts, just not necessarily together. There is
+        // no manual fallback any more — the old one swapped
+        // #basic-search-section's classes and called performDownloadsSearch,
+        // and React owns both of those now.
         if (attempts < 25) setTimeout(tryHandoff, 160);
     };
     setTimeout(tryHandoff, 200);
