@@ -2072,3 +2072,89 @@ describe('the detail renderer', () => {
     expect(detail.querySelector('.repair-finding-media-card--link')).toBeNull();
   });
 });
+
+// ── Live refresh on job completion ───────────────────────────────────────────
+
+/**
+ * A job finishing anywhere — the scheduler, or Run Now on the hero — used to
+ * leave the health score, status counts and inbox groups stale until the user
+ * did something ELSE in this component (dismiss/fix/etc, which happens to call
+ * refreshAll) or reloaded the page. Mirrors maintenance-hero.test.tsx's own
+ * #1144 coverage for the same class of bug, one level down: that fix refreshed
+ * the hero's job cards and history; findings/counts/groups were still nobody's
+ * job to refresh.
+ */
+describe('live refresh on job completion', () => {
+  async function finishFrame(status = 'finished') {
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('ss:repair-progress', {
+          detail: { orphan_file_detector: { status, progress: 100, phase: 'Done' } },
+        }),
+      );
+    });
+  }
+
+  const countsCalls = () =>
+    fetchMock.mock.calls.filter(([url]) => String(url).includes(COUNTS)).length;
+
+  it('refreshes counts and groups as soon as a job finishes', async () => {
+    routes({ [COUNTS]: { pending: 0 }, [GROUPS]: { groups: [] } });
+    const { onStatusChanged } = renderSurface();
+    await flush();
+    const afterMount = countsCalls();
+
+    await finishFrame();
+
+    expect(countsCalls()).toBe(afterMount + 1);
+    expect(onStatusChanged).toHaveBeenCalled();
+  });
+
+  it('refreshes on a job that ERRORED too', async () => {
+    routes({ [COUNTS]: { pending: 0 }, [GROUPS]: { groups: [] } });
+    renderSurface();
+    await flush();
+    const afterMount = countsCalls();
+
+    await finishFrame('error');
+
+    expect(countsCalls()).toBe(afterMount + 1);
+  });
+
+  it('does not refresh while a job is still running', async () => {
+    routes({ [COUNTS]: { pending: 0 }, [GROUPS]: { groups: [] } });
+    renderSurface();
+    await flush();
+    const afterMount = countsCalls();
+
+    await finishFrame('running');
+
+    expect(countsCalls()).toBe(afterMount);
+  });
+
+  it('refreshes ONCE per completion, not on every frame that follows', async () => {
+    routes({ [COUNTS]: { pending: 0 }, [GROUPS]: { groups: [] } });
+    renderSurface();
+    await flush();
+    const afterMount = countsCalls();
+
+    await finishFrame();
+    await finishFrame();
+    await finishFrame();
+
+    expect(countsCalls()).toBe(afterMount + 1);
+  });
+
+  it('refreshes again on a SECOND completion of the same job', async () => {
+    routes({ [COUNTS]: { pending: 0 }, [GROUPS]: { groups: [] } });
+    renderSurface();
+    await flush();
+    const afterMount = countsCalls();
+
+    await finishFrame();
+    await finishFrame('running'); // job runs again — clears the single-shot guard
+    await finishFrame();
+
+    expect(countsCalls()).toBe(afterMount + 2);
+  });
+});

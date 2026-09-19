@@ -76,6 +76,7 @@ import {
   REPAIR_DEFAULT_PAGE_SIZE,
   REPAIR_PAGE_SIZE_OPTIONS,
 } from '../-tools.core';
+import { useRepairProgressEvent } from '../-tools.events';
 import { safeFixablePending, visibleGroups } from '../-tools.groups';
 import { FindingDetail } from './finding-detail';
 import { useFindingPrompts } from './finding-prompts';
@@ -320,6 +321,32 @@ export function FindingsSurface({
   }, [refreshAll]);
 
   watchBulkFixRef.current = watchBulkFixRun;
+
+  // Live push: a job finishing (scheduled, or Run Now from the hero) used to
+  // leave the health score, status counts, inbox groups and any open list
+  // stale until something ELSE in this component happened to call
+  // refreshAll() — a page reload was the only reliable way to see the new
+  // findings. `seenDone` makes the refresh single-shot per completion, same
+  // as the hero's own hideTimers do for its job panels.
+  const seenDone = useRef<Set<string>>(new Set());
+  useRepairProgressEvent(
+    useCallback(
+      (frames) => {
+        let justFinished = false;
+        for (const [jobId, frame] of Object.entries(frames)) {
+          const done = frame.status === 'finished' || frame.status === 'error';
+          if (done && !seenDone.current.has(jobId)) {
+            seenDone.current.add(jobId);
+            justFinished = true;
+          } else if (!done) {
+            seenDone.current.delete(jobId);
+          }
+        }
+        if (justFinished) refreshAll();
+      },
+      [refreshAll],
+    ),
+  );
 
   useEffect(
     () => () => {
