@@ -172,21 +172,31 @@ def test_build_queries_dedupes_case_insensitive():
 # _deezer_preview_result / deezer_preview mode
 # ---------------------------------------------------------------------------
 
+class _FakeTrack:
+    def __init__(self, preview_url=None):
+        self.preview_url = preview_url
+
+
 class _FakeDeezerClient:
-    def __init__(self, track=None, raises=False):
-        self._track = track
+    """search_tracks(track=, artist=, limit=) fake, keyed by exact (lowercased)
+    track title — matches the real client's field-scoped call shape."""
+
+    def __init__(self, tracks_by_title=None, raises=False):
+        self._by_title = {k.lower(): v for k, v in (tracks_by_title or {}).items()}
         self._raises = raises
         self.calls = []
 
-    def search_track(self, artist_name, track_title):
-        self.calls.append((artist_name, track_title))
+    def search_tracks(self, track=None, artist=None, limit=5):
+        self.calls.append((artist, track))
         if self._raises:
             raise RuntimeError("network boom")
-        return self._track
+        return self._by_title.get((track or '').lower(), [])
 
 
 def test_deezer_preview_result_returns_preview_shaped_dict():
-    client = _FakeDeezerClient(track={'preview': 'https://cdn.deezer.com/preview/abc.mp3'})
+    client = _FakeDeezerClient(tracks_by_title={
+        'Money': [_FakeTrack(preview_url='https://cdn.deezer.com/preview/abc.mp3')],
+    })
     result = stream._deezer_preview_result('Pink Floyd', 'Money', client)
     assert result['result_type'] == 'preview_url'
     assert result['preview_url'] == 'https://cdn.deezer.com/preview/abc.mp3'
@@ -195,13 +205,23 @@ def test_deezer_preview_result_returns_preview_shaped_dict():
 
 
 def test_deezer_preview_result_none_when_no_track_match():
-    client = _FakeDeezerClient(track=None)
+    client = _FakeDeezerClient(tracks_by_title={})
     assert stream._deezer_preview_result('Pink Floyd', 'Money', client) is None
 
 
 def test_deezer_preview_result_none_when_track_has_no_preview_field():
-    client = _FakeDeezerClient(track={'id': 1, 'title': 'Money'})  # no 'preview' key
+    client = _FakeDeezerClient(tracks_by_title={'Money': [_FakeTrack(preview_url=None)]})
     assert stream._deezer_preview_result('Pink Floyd', 'Money', client) is None
+
+
+def test_deezer_preview_result_picks_first_result_with_a_preview():
+    # search_tracks can return several matches; skip ones missing a preview
+    # (some regions/tracks omit it) rather than giving up on the whole list.
+    client = _FakeDeezerClient(tracks_by_title={
+        'Money': [_FakeTrack(preview_url=None), _FakeTrack(preview_url='https://cdn.deezer.com/preview/second.mp3')],
+    })
+    result = stream._deezer_preview_result('Pink Floyd', 'Money', client)
+    assert result['preview_url'] == 'https://cdn.deezer.com/preview/second.mp3'
 
 
 def test_deezer_preview_result_none_when_client_missing():
@@ -213,23 +233,13 @@ def test_deezer_preview_result_none_on_lookup_exception():
     assert stream._deezer_preview_result('Pink Floyd', 'Money', client) is None
 
 
-class _FakePerTitleDeezerClient:
-    """Maps exact (case-insensitive) titles to track dicts; anything else misses."""
-
-    def __init__(self, by_title):
-        self._by_title = {k.lower(): v for k, v in by_title.items()}
-        self.calls = []
-
-    def search_track(self, artist_name, track_title):
-        self.calls.append((artist_name, track_title))
-        return self._by_title.get(track_title.lower())
-
-
 def test_deezer_preview_result_falls_back_to_cleaned_title_on_exact_miss():
     # Deezer's catalog has "Tearin' Up My Heart" but the source track name
-    # carries a "(Radio Edit)" suffix Deezer's title field never has.
-    client = _FakePerTitleDeezerClient({
-        "Tearin' Up My Heart": {'preview': 'https://cdn.deezer.com/preview/xyz.mp3'},
+    # carries a "(Radio Edit)" suffix Deezer's title field never has, and
+    # search_tracks' own free-text fallback still didn't surface it for
+    # this exact title (the real-world case this regression came from).
+    client = _FakeDeezerClient(tracks_by_title={
+        "Tearin' Up My Heart": [_FakeTrack(preview_url='https://cdn.deezer.com/preview/xyz.mp3')],
     })
     result = stream._deezer_preview_result(
         '*NSYNC', "Tearin' Up My Heart (Radio Edit)", client)
@@ -243,7 +253,7 @@ def test_deezer_preview_result_falls_back_to_cleaned_title_on_exact_miss():
 
 
 def test_deezer_preview_result_none_when_both_exact_and_cleaned_miss():
-    client = _FakePerTitleDeezerClient({})
+    client = _FakeDeezerClient(tracks_by_title={})
     result = stream._deezer_preview_result(
         '*NSYNC', "Tearin' Up My Heart (Radio Edit)", client)
     assert result is None
@@ -251,8 +261,8 @@ def test_deezer_preview_result_none_when_both_exact_and_cleaned_miss():
 
 
 def test_deezer_preview_result_single_attempt_when_title_has_no_version_marker():
-    client = _FakePerTitleDeezerClient({
-        'Money': {'preview': 'https://cdn.deezer.com/preview/abc.mp3'},
+    client = _FakeDeezerClient(tracks_by_title={
+        'Money': [_FakeTrack(preview_url='https://cdn.deezer.com/preview/abc.mp3')],
     })
     result = stream._deezer_preview_result('Pink Floyd', 'Money', client)
     assert result is not None
@@ -260,7 +270,9 @@ def test_deezer_preview_result_single_attempt_when_title_has_no_version_marker()
 
 
 def test_stream_search_track_deezer_preview_mode_returns_preview():
-    client = _FakeDeezerClient(track={'preview': 'https://cdn.deezer.com/preview/abc.mp3'})
+    client = _FakeDeezerClient(tracks_by_title={
+        'Money': [_FakeTrack(preview_url='https://cdn.deezer.com/preview/abc.mp3')],
+    })
     cfg = _FakeConfig({'download_source.stream_source': 'deezer_preview'})
 
     result = stream.stream_search_track(
@@ -278,7 +290,7 @@ def test_stream_search_track_deezer_preview_mode_returns_preview():
 def test_stream_search_track_deezer_preview_mode_miss_returns_none_no_fallback():
     # No preview available — must NOT fall through to a Soulseek/YouTube
     # search; the user explicitly chose preview-only.
-    client = _FakeDeezerClient(track=None)
+    client = _FakeDeezerClient(tracks_by_title={})
     soul = _FakeSoulseek(results_per_query={'Pink Floyd Money': ([object()], [])})
     cfg = _FakeConfig({'download_source.stream_source': 'deezer_preview'})
 
