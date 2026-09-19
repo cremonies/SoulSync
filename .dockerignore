@@ -87,6 +87,11 @@ ui/
 # Dev-specific files
 requirements-dev.txt
 
+# Test suites — never run inside the built image (~58MB of pytest tests +
+# fixtures; webui/tests/ is Vitest-only, unrelated to the npm build stage).
+tests/
+webui/tests/
+
 # OS generated files
 .DS_Store
 .DS_Store?
