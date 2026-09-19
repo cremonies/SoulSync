@@ -10,6 +10,12 @@ Stream source resolution:
 - If `download_source.stream_source` is "youtube" (default), use the
   YouTube downloader for previews — instant, no auth pressure on the
   download stack.
+- If it's "deezer_preview", fetch Deezer's own public 30-second preview
+  clip directly (no auth, no queueing, no full download) — the actual
+  "preview" feature Deezer's public catalog API exposes for every track.
+  Independent of download_source.mode: it never touches the download
+  stack at all, so it stays "deezer_preview" even when the active/hybrid
+  download source is something else entirely.
 - If it's "active", mirror the user's download mode (tidal / qobuz /
   hifi / deezer_dl / lidarr) — but coerce Soulseek to YouTube because
   Soulseek is too slow for streaming previews.
@@ -31,6 +37,8 @@ def _resolve_effective_stream_mode(config_manager) -> str:
 
     if stream_source == 'youtube':
         return 'youtube'
+    if stream_source == 'deezer_preview':
+        return 'deezer_preview'
 
     hybrid_order = config_manager.get('download_source.hybrid_order', ['hifi', 'youtube', 'soulseek'])
     hybrid_first = hybrid_order[0] if hybrid_order else config_manager.get('download_source.hybrid_primary', 'hifi')
@@ -41,6 +49,41 @@ def _resolve_effective_stream_mode(config_manager) -> str:
     if download_mode == 'hybrid':
         return hybrid_first
     return download_mode
+
+
+def _deezer_preview_result(artist_name: str, track_name: str, deezer_client) -> Optional[dict]:
+    """Look up a track on Deezer's public catalog and return its 30-second
+    preview clip as a stream result, or None when there's no match or no
+    preview URL (some regions/tracks omit it).
+
+    Shaped differently from ``_result_to_dict``'s Soulseek-style dict —
+    ``result_type: "preview_url"`` is the signal ``prepare_stream_task``
+    uses to skip the download-orchestrator flow entirely and just fetch
+    this one small, already-public file.
+    """
+    if deezer_client is None:
+        return None
+    try:
+        track = deezer_client.search_track(artist_name, track_name)
+    except Exception as e:
+        logger.warning(f"Deezer preview lookup failed for '{artist_name} - {track_name}': {e}")
+        return None
+    if not track:
+        return None
+    preview_url = track.get('preview')
+    if not preview_url:
+        logger.info(f"Deezer match for '{artist_name} - {track_name}' has no preview clip")
+        return None
+    return {
+        "result_type": "preview_url",
+        "preview_url": preview_url,
+        "filename": f"{artist_name} - {track_name} (preview).mp3",
+        "size": 0,
+        "bitrate": 128,
+        "duration": 30,
+        "quality": "preview",
+        "username": "deezer_preview",
+    }
 
 
 def _build_stream_queries(track_name: str, artist_name: str, effective_mode: str) -> list[str]:
@@ -99,22 +142,41 @@ def stream_search_track(
     download_orchestrator,
     matching_engine,
     run_async: Callable,
+    deezer_client_getter: Optional[Callable] = None,
 ) -> Optional[dict]:
     """Find the best Soulseek/stream-source result for a single track.
 
     Returns the matched result dict on success, or `None` if no query
     variant produced a usable match. The route layer turns `None` into a
     404 response.
+
+    ``deezer_client_getter`` is only consulted when the effective mode is
+    "deezer_preview" — it's optional so existing callers/tests that never
+    exercise that mode don't need to supply one.
     """
+    effective_mode = _resolve_effective_stream_mode(config_manager)
+    logger.info(f"Stream source effective mode: {effective_mode}")
+
+    if effective_mode == 'deezer_preview':
+        # Deliberately does not fall through to a full download on a miss —
+        # the user picked "preview only", and silently substituting a full
+        # download from a different source on failure would defeat that
+        # choice. A miss here just means no stream, same as an exhausted
+        # query loop below.
+        client = deezer_client_getter() if deezer_client_getter else None
+        result = _deezer_preview_result(artist_name, track_name, client)
+        if result:
+            logger.info(f"Deezer preview found for '{artist_name} - {track_name}'")
+        else:
+            logger.warning(f"No Deezer preview available for '{artist_name} - {track_name}'")
+        return result
+
     temp_track = type('TempTrack', (), {
         'name': track_name,
         'artists': [artist_name],
         'album': album_name if album_name else None,
         'duration_ms': duration_ms,
     })()
-
-    effective_mode = _resolve_effective_stream_mode(config_manager)
-    logger.info(f"Stream source effective mode: {effective_mode}")
 
     queries = _build_stream_queries(track_name, artist_name, effective_mode)
 

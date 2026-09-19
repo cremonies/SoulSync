@@ -90,6 +90,20 @@ def test_stream_source_youtube_returns_youtube():
     assert stream._resolve_effective_stream_mode(cfg) == 'youtube'
 
 
+def test_stream_source_deezer_preview_returns_deezer_preview():
+    cfg = _FakeConfig({'download_source.stream_source': 'deezer_preview'})
+    assert stream._resolve_effective_stream_mode(cfg) == 'deezer_preview'
+
+
+def test_stream_source_deezer_preview_ignores_download_mode():
+    # Independent of download_source.mode entirely, unlike 'active'.
+    cfg = _FakeConfig({
+        'download_source.stream_source': 'deezer_preview',
+        'download_source.mode': 'soulseek',
+    })
+    assert stream._resolve_effective_stream_mode(cfg) == 'deezer_preview'
+
+
 def test_stream_source_active_with_hybrid_first_returns_first():
     cfg = _FakeConfig({
         'download_source.stream_source': 'active',
@@ -152,6 +166,96 @@ def test_build_queries_dedupes_case_insensitive():
     qs = stream._build_stream_queries('Money', 'Pink Floyd', 'soulseek')
     # Cleaned == original → dedup → only one entry
     assert qs == ['Money']
+
+
+# ---------------------------------------------------------------------------
+# _deezer_preview_result / deezer_preview mode
+# ---------------------------------------------------------------------------
+
+class _FakeDeezerClient:
+    def __init__(self, track=None, raises=False):
+        self._track = track
+        self._raises = raises
+        self.calls = []
+
+    def search_track(self, artist_name, track_title):
+        self.calls.append((artist_name, track_title))
+        if self._raises:
+            raise RuntimeError("network boom")
+        return self._track
+
+
+def test_deezer_preview_result_returns_preview_shaped_dict():
+    client = _FakeDeezerClient(track={'preview': 'https://cdn.deezer.com/preview/abc.mp3'})
+    result = stream._deezer_preview_result('Pink Floyd', 'Money', client)
+    assert result['result_type'] == 'preview_url'
+    assert result['preview_url'] == 'https://cdn.deezer.com/preview/abc.mp3'
+    assert result['duration'] == 30
+    assert client.calls == [('Pink Floyd', 'Money')]
+
+
+def test_deezer_preview_result_none_when_no_track_match():
+    client = _FakeDeezerClient(track=None)
+    assert stream._deezer_preview_result('Pink Floyd', 'Money', client) is None
+
+
+def test_deezer_preview_result_none_when_track_has_no_preview_field():
+    client = _FakeDeezerClient(track={'id': 1, 'title': 'Money'})  # no 'preview' key
+    assert stream._deezer_preview_result('Pink Floyd', 'Money', client) is None
+
+
+def test_deezer_preview_result_none_when_client_missing():
+    assert stream._deezer_preview_result('Pink Floyd', 'Money', None) is None
+
+
+def test_deezer_preview_result_none_on_lookup_exception():
+    client = _FakeDeezerClient(raises=True)
+    assert stream._deezer_preview_result('Pink Floyd', 'Money', client) is None
+
+
+def test_stream_search_track_deezer_preview_mode_returns_preview():
+    client = _FakeDeezerClient(track={'preview': 'https://cdn.deezer.com/preview/abc.mp3'})
+    cfg = _FakeConfig({'download_source.stream_source': 'deezer_preview'})
+
+    result = stream.stream_search_track(
+        track_name='Money', artist_name='Pink Floyd', album_name=None,
+        duration_ms=180000,
+        config_manager=cfg, download_orchestrator=None, matching_engine=None,
+        run_async=_run_async,
+        deezer_client_getter=lambda: client,
+    )
+    assert result is not None
+    assert result['result_type'] == 'preview_url'
+    assert result['preview_url'] == 'https://cdn.deezer.com/preview/abc.mp3'
+
+
+def test_stream_search_track_deezer_preview_mode_miss_returns_none_no_fallback():
+    # No preview available — must NOT fall through to a Soulseek/YouTube
+    # search; the user explicitly chose preview-only.
+    client = _FakeDeezerClient(track=None)
+    soul = _FakeSoulseek(results_per_query={'Pink Floyd Money': ([object()], [])})
+    cfg = _FakeConfig({'download_source.stream_source': 'deezer_preview'})
+
+    result = stream.stream_search_track(
+        track_name='Money', artist_name='Pink Floyd', album_name=None,
+        duration_ms=180000,
+        config_manager=cfg, download_orchestrator=soul, matching_engine=None,
+        run_async=_run_async,
+        deezer_client_getter=lambda: client,
+    )
+    assert result is None
+    assert soul.search_calls == []  # never touched the download stack
+
+
+def test_stream_search_track_deezer_preview_mode_without_getter_returns_none():
+    cfg = _FakeConfig({'download_source.stream_source': 'deezer_preview'})
+    result = stream.stream_search_track(
+        track_name='Money', artist_name='Pink Floyd', album_name=None,
+        duration_ms=180000,
+        config_manager=cfg, download_orchestrator=None, matching_engine=None,
+        run_async=_run_async,
+    )
+    assert result is None
 
 
 # ---------------------------------------------------------------------------
