@@ -56,6 +56,7 @@ _JOB_MODULES = [
     'core.repair_jobs.audio_corruption_detector',
     'core.repair_jobs.genre_cleanup',
     'core.repair_jobs.genre_enrichment',
+    'core.repair_jobs.genre_tag_writer',
     'core.repair_jobs.comma_artist_splitter',
 ]
 

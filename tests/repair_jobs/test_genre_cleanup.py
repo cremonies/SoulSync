@@ -150,8 +150,13 @@ def test_fix_refuses_bad_inputs(db):
 # ── the tag-write seam (#1057 part A) ────────────────────────────────────────
 
 def test_write_tags_payload_filters_genres_when_strict(monkeypatch):
+    # web_server._build_library_tag_db_data is just an imported alias for
+    # core.library.tag_sync.build_library_tag_db_data (shared with the
+    # Genre Tag Writer repair job) — the module-level config_manager it
+    # reads lives there now, not on web_server.
+    import core.library.tag_sync as tag_sync
     import web_server
-    monkeypatch.setattr(web_server, 'config_manager', _Cfg())
+    monkeypatch.setattr(tag_sync, 'config_manager', _Cfg())
     payload = web_server._build_library_tag_db_data(
         {'title': 'T', 'artist_name': 'A', 'album_title': 'Al'},
         ['Rock', 'seen live', 'favorites'])
@@ -159,8 +164,9 @@ def test_write_tags_payload_filters_genres_when_strict(monkeypatch):
 
 
 def test_write_tags_payload_untouched_when_strict_off(monkeypatch):
+    import core.library.tag_sync as tag_sync
     import web_server
-    monkeypatch.setattr(web_server, 'config_manager', _Cfg(enabled=False))
+    monkeypatch.setattr(tag_sync, 'config_manager', _Cfg(enabled=False))
     payload = web_server._build_library_tag_db_data(
         {'title': 'T', 'artist_name': 'A', 'album_title': 'Al'},
         ['Rock', 'seen live'])

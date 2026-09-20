@@ -159,6 +159,7 @@ JOB_CATEGORIES = {
     'mbid_mismatch_detector': 'Tags & metadata',
     'genre_cleanup': 'Tags & metadata',
     'genre_enrichment': 'Tags & metadata',
+    'genre_tag_writer': 'Tags & metadata',
     'comma_artist_splitter': 'Tags & metadata',
     'unknown_artist_fixer': 'Tags & metadata',
     'metadata_gap_filler': 'Tags & metadata',
@@ -1940,6 +1941,7 @@ class RepairWorker:
             'canonical_version': self._fix_canonical_version,
             'genre_cleanup': self._fix_genre_cleanup,
             'genre_enrichment': self._fix_genre_enrichment,
+            'genre_tag_writer': self._fix_genre_tag_writer,
             'comma_artist_split': self._fix_comma_artist_split,
         }
 
@@ -2015,6 +2017,43 @@ class RepairWorker:
             except Exception as close_err:   # noqa: BLE001 — the real error is already logged above
                 logger.debug("Genre enrichment: connection close failed: %s", close_err)
             return {'success': False, 'error': str(e)}
+
+    def _fix_genre_tag_writer(self, entity_type, entity_id, file_path, details):
+        """Write an album's whitelist-clean genre list into one track's file.
+
+        Stale-finding guard: if the file's genre tag no longer matches what
+        the scan saw (a manual edit, a Write Tags run, another job), something
+        else already changed it since — skip rather than clobber whatever is
+        there now. Mirrors the guard comma_artist_splitter's fix uses for the
+        same reason.
+        """
+        new_genre = details.get('new_genre')
+        if not isinstance(new_genre, list) or not new_genre:
+            return {'success': False, 'error': 'Finding has no new_genre list'}
+
+        download_folder = self._config_manager.get('soulseek.download_path', '') if self._config_manager else None
+        resolved = _resolve_file_path(
+            details.get('resolved_path') or file_path, self.transfer_folder, download_folder,
+            config_manager=self._config_manager) or details.get('resolved_path') or file_path
+        if not resolved or not os.path.exists(resolved):
+            return {'success': False, 'error': f'File not found: {file_path}'}
+
+        from core.tag_writer import read_file_tags, write_tags_to_file
+        current = read_file_tags(resolved)
+        if current.get('error'):
+            return {'success': False, 'error': current['error']}
+
+        expected_current = str(details.get('current_genre') or '').strip()
+        actual_current = str(current.get('genre') or '').strip()
+        if actual_current != expected_current:
+            return {'success': True, 'action': 'already_changed',
+                    'message': 'File genre already changed since this was found'}
+
+        res = write_tags_to_file(resolved, {'genres': new_genre}, embed_cover=False)
+        if not res.get('success'):
+            return {'success': False, 'error': res.get('error', 'Tag write failed')}
+        return {'success': True, 'action': 'genre_written',
+                'message': f"Genre updated to {', '.join(new_genre)}"}
 
     def _fix_comma_artist_split(self, entity_type, entity_id, file_path, details):
         """Split a separator-joined artist tag into properly separated artists (jadux).
