@@ -77536,6 +77536,21 @@ body.em-scroll-lock { overflow: hidden; }
 .em-section-label--row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .em-coverage-overall { font-size: 12.5px; font-weight: 500; letter-spacing: 0; text-transform: none; color: rgba(255,255,255,0.55); }
 .em-coverage-overall strong { color: rgb(var(--em-accent-rgb, 129,140,248)); font-weight: 800; }
+
+/* Worker hero + coverage cards, collapsible so the unmatched list below can
+   claim that height instead — the panel stacks header/banner/cards/label/list
+   in one flex column, so hiding this wrapper hands the freed space straight
+   to em-unmatched-list's own flex:1 1 auto. */
+.em-details { display: flex; flex-direction: column; gap: 16px; flex: 0 0 auto; }
+.em-details--collapsed { display: none; }
+.em-details-toggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; margin-right: 6px; padding: 0;
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;
+    background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.6);
+    font-size: 11px; line-height: 1; cursor: pointer; vertical-align: middle;
+}
+.em-details-toggle:hover { background: rgba(255,255,255,0.1); color: #fff; }
 /* Accent-themed buttons / active states inside the panel */
 .em-panel .em-btn { border-color: rgba(var(--em-accent-rgb, 99,102,241), 0.45); background: rgba(var(--em-accent-rgb, 99,102,241), 0.16); }
 .em-panel .em-btn:hover:not(:disabled) { background: rgba(var(--em-accent-rgb, 99,102,241), 0.3); }

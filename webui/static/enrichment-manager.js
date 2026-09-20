@@ -104,6 +104,10 @@ const enrichmentManagerState = {
     selectedItems: new Set(),  // ids checked for bulk retry
     pollTimer: null,
     loadToken: 0,       // guards against out-of-order async renders
+    // Hides the worker hero + coverage cards so the unmatched list gets the
+    // panel's full height — the list's own scroll area is otherwise cramped
+    // under the header, three stat cards and the filter row (#1180).
+    detailsCollapsed: false,
 };
 
 function _emEntityLabel(entity, plural) {
@@ -502,14 +506,20 @@ function renderEnrichmentPanel() {
     panel.style.setProperty('--em-accent', worker.color);
     panel.style.setProperty('--em-accent-rgb', _emHexToRgb(worker.color));
 
+    const collapsed = enrichmentManagerState.detailsCollapsed;
     panel.innerHTML = `
-        <div class="em-panel-header" id="em-panel-header"></div>
-        <div class="em-banner" id="em-banner" hidden></div>
+        <div class="em-details${collapsed ? ' em-details--collapsed' : ''}" id="em-details">
+            <div class="em-panel-header" id="em-panel-header"></div>
+            <div class="em-banner" id="em-banner" hidden></div>
+            <div class="em-cards" id="em-cards"></div>
+        </div>
         <div class="em-section-label em-section-label--row">
-            <span>Coverage &amp; processing order <span class="em-section-sub">— click a group to enrich it first</span></span>
+            <span>
+                <button type="button" class="em-details-toggle" title="${collapsed ? 'Show worker details' : 'Hide worker details — more room for the list'}" onclick="toggleEnrichmentDetails()">${collapsed ? '▾' : '▴'}</button>
+                Coverage &amp; processing order <span class="em-section-sub">— click a group to enrich it first</span>
+            </span>
             <span class="em-coverage-overall" id="em-coverage-overall"></span>
         </div>
-        <div class="em-cards" id="em-cards"></div>
         <div class="em-unmatched">
             <div class="em-unmatched-controls" id="em-unmatched-controls"></div>
             <div class="em-bulk-bar" id="em-bulk-bar" hidden></div>
@@ -520,6 +530,15 @@ function renderEnrichmentPanel() {
     _emRenderEntityCards();
     _emRenderUnmatchedControls();
     _emRenderUnmatchedList();
+}
+
+// Hides the worker hero + coverage cards (em-details--collapsed sets
+// display:none on the wrapper) so the panel's flex column gives that freed
+// height to em-unmatched-list instead — a full re-render so the toggle
+// button's own arrow/label flips too, not just the section it controls.
+function toggleEnrichmentDetails() {
+    enrichmentManagerState.detailsCollapsed = !enrichmentManagerState.detailsCollapsed;
+    renderEnrichmentPanel();
 }
 
 // Combined coverage + processing-order cards. Each entity card both visualises
