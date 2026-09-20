@@ -316,14 +316,21 @@ def _search_service(service, entity_type, query):
         # Deezer client only returns single results, so hit the API directly for multiple
         type_map = {'artist': 'artist', 'album': 'album', 'track': 'track'}
         deezer_type = type_map.get(entity_type, 'track')
-        try:
-            # shared deezer budget — this call used to bypass it entirely
-            from core.deezer_throttle import wait_for_slot
-            wait_for_slot()
-            resp = req_lib.get(f'https://api.deezer.com/search/{deezer_type}', params={'q': query, 'limit': 8}, timeout=10)
-            data = resp.json().get('data', [])
-        except Exception:
-            data = []
+        # shared deezer budget — this call used to bypass it entirely
+        from core.deezer_throttle import wait_for_slot
+        wait_for_slot()
+        resp = req_lib.get(f'https://api.deezer.com/search/{deezer_type}', params={'q': query, 'limit': 8}, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        # A blanket except used to swallow every failure here into an empty
+        # list, so a rate limit / timeout / Deezer-side error looked exactly
+        # like "not on Deezer" in the modal ("No results found") with nothing
+        # in the logs to tell them apart. Let real failures propagate to the
+        # route's own handler, which already logs them and returns a proper
+        # error message — same as every other service branch here.
+        if 'error' in payload:
+            raise ValueError(f"Deezer search error: {payload['error']}")
+        data = payload.get('data', [])
         results = []
         for item in data:
             if entity_type == 'artist':
