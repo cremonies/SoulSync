@@ -49,7 +49,7 @@ class GenreCleanupJob(RepairJob):
     display_name = 'Genre Tag Cleanup'
     description = 'Removes off-whitelist genres stored before strict genre filtering was enabled'
     help_text = (
-        'Strict genre filtering (Settings → Metadata) only applies to NEW metadata as it is '
+        'Strict genre filtering (Settings → Library → Filtering) only applies to NEW metadata as it is '
         'fetched — genres that were stored before you enabled it stay on your artists and '
         'albums, and get pushed to your media server and written into file tags.\n\n'
         'This job re-checks every stored genre list against your whitelist. Each artist or '
@@ -77,7 +77,7 @@ class GenreCleanupJob(RepairJob):
             if context.report_progress:
                 context.report_progress(
                     phase='Skipped — strict genre filtering is off',
-                    log_line='Enable strict genre filtering (Settings → Metadata) for this job to have anything to clean.',
+                    log_line='Enable strict genre filtering (Settings → Library → Filtering) for this job to have anything to clean.',
                     log_type='info')
             return result
 
