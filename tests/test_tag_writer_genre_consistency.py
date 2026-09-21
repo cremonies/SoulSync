@@ -53,7 +53,10 @@ def test_write_preserves_richer_existing_genre_when_db_is_a_subset(flac_path):
     assert result['success'] is True
     # The narrower DB genre must not clobber the richer existing tag —
     # matches what build_tag_diff already shows as "no change" for this pair.
-    assert FLAC(flac_path).get('genre') == ['Electronic; House; Techno']
+    # The write still runs (preserving the SAME genres), and now splits them
+    # into real multi-value entries instead of one comma/semicolon string —
+    # a legacy single-value tag gets fixed as a side effect of any write.
+    assert FLAC(flac_path).get('genre') == ['Electronic', 'House', 'Techno']
 
 
 def test_write_still_applies_a_genuinely_different_genre(flac_path):
@@ -64,7 +67,10 @@ def test_write_still_applies_a_genuinely_different_genre(flac_path):
     result = write_tags_to_file(
         flac_path, {'genres': ['Electronic', 'House']}, embed_cover=False)
     assert result['success'] is True
-    assert FLAC(flac_path).get('genre') == ['Electronic, House']
+    # Written as two real multi-value entries, not one comma-joined string —
+    # Jellyfin and most other readers split on tag structure, not commas
+    # inside a single value.
+    assert FLAC(flac_path).get('genre') == ['Electronic', 'House']
 
 
 def test_write_applies_genre_when_file_has_none_yet(flac_path):
@@ -87,5 +93,7 @@ def test_diff_and_write_agree_on_subset_genre(flac_path):
     assert genre_diff['changed'] is False
 
     write_tags_to_file(flac_path, {'genres': ['Electronic']}, embed_cover=False)
-    # The write must match what the diff promised: no actual change.
-    assert FLAC(flac_path).get('genre') == ['Electronic; House; Techno']
+    # The write must match what the diff promised: no actual change — same
+    # genres survive, now split into real multi-value entries (see the
+    # preserves_richer_existing_genre test above for why the list form).
+    assert FLAC(flac_path).get('genre') == ['Electronic', 'House', 'Techno']

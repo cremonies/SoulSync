@@ -72,7 +72,7 @@ def read_file_tags(file_path: str) -> Dict[str, Any]:
             result['album_artist'] = _id3_text(audio.tags, 'TPE2')
             result['album'] = _id3_text(audio.tags, 'TALB')
             result['year'] = _id3_text(audio.tags, 'TDRC')
-            result['genre'] = _id3_text(audio.tags, 'TCON')
+            result['genre'] = _id3_genre_text(audio.tags, 'TCON')
             result['track_number'] = _parse_track_num(_id3_text(audio.tags, 'TRCK'))
             result['disc_number'] = _parse_track_num(_id3_text(audio.tags, 'TPOS'))
             bpm_text = _id3_text(audio.tags, 'TBPM')
@@ -94,7 +94,7 @@ def read_file_tags(file_path: str) -> Dict[str, Any]:
             result['album_artist'] = _vorbis_first(audio, 'albumartist')
             result['album'] = _vorbis_first(audio, 'album')
             result['year'] = _vorbis_first(audio, 'date')
-            result['genre'] = _vorbis_first(audio, 'genre')
+            result['genre'] = _vorbis_genre_text(audio, 'genre')
             result['track_number'] = _parse_track_num(_vorbis_first(audio, 'tracknumber'))
             result['disc_number'] = _parse_track_num(_vorbis_first(audio, 'discnumber'))
             bpm_val = _vorbis_first(audio, 'bpm')
@@ -117,7 +117,7 @@ def read_file_tags(file_path: str) -> Dict[str, Any]:
             result['album_artist'] = _mp4_first(audio, 'aART')
             result['album'] = _mp4_first(audio, '\xa9alb')
             result['year'] = _mp4_first(audio, '\xa9day')
-            result['genre'] = _mp4_first(audio, '\xa9gen')
+            result['genre'] = _mp4_genre_text(audio, '\xa9gen')
             trkn = audio.tags.get('trkn', []) if audio.tags else []
             if trkn:
                 result['track_number'] = trkn[0][0] if isinstance(trkn[0], tuple) else None
@@ -200,6 +200,23 @@ def write_verification_status(file_path: str, status: str) -> bool:
     except Exception as e:
         logger.debug("write_verification_status failed for %s: %s", file_path, e)
         return False
+
+
+def _split_genre(genre: Any) -> List[str]:
+    """A genre value as the list of individual tokens the tag should actually
+    carry. Every _write_* function used to hand a comma-joined string straight
+    to mutagen as a single-element list — writing ONE genre whose name happens
+    to contain commas, not several genres. ID3 TCON, Vorbis GENRE, and MP4
+    \xa9gen all natively support multiple discrete values (Picard convention);
+    Jellyfin and most other readers split on that structure, not on commas
+    inside one value. ``genre`` is already comma/semicolon-joined by the time
+    it reaches here (built once in write_tags_to_file); this undoes that join
+    right before the mutagen write so the file gets real multi-value tags."""
+    import re
+    if isinstance(genre, (list, tuple)):
+        return [str(g).strip() for g in genre if str(g).strip()] or [str(genre)]
+    tokens = [g.strip() for g in re.split(r'[,;]+', str(genre)) if g.strip()]
+    return tokens or [str(genre)]
 
 
 def genre_write_value_is_subset_of_existing(file_genre_str: Any, db_genre_str: Any) -> bool:
@@ -647,7 +664,7 @@ def _write_id3(audio, title, artist, album_artist, album, year, genre,
         written.append('year')
     if genre:
         audio.tags.delall('TCON')
-        audio.tags.add(TCON(encoding=3, text=[genre]))
+        audio.tags.add(TCON(encoding=3, text=_split_genre(genre)))
         written.append('genre')
     if track_num is not None:
         audio.tags.delall('TRCK')
@@ -692,7 +709,7 @@ def _write_vorbis(audio, title, artist, album_artist, album, year, genre,
         audio['date'] = [_date_to_write(_vorbis_first(audio, 'date'), year)]
         written.append('year')
     if genre:
-        audio['genre'] = [genre]
+        audio['genre'] = _split_genre(genre)
         written.append('genre')
     if track_num is not None:
         # Bare number + separate total: Vorbis does not share ID3's "N/M"
@@ -743,7 +760,7 @@ def _write_mp4(audio, title, artist, album_artist, album, year, genre,
         audio['\xa9day'] = [_date_to_write(_mp4_first(audio, '\xa9day'), year)]
         written.append('year')
     if genre:
-        audio['\xa9gen'] = [genre]
+        audio['\xa9gen'] = _split_genre(genre)
         written.append('genre')
     if track_num is not None:
         total = total_tracks or 0
@@ -808,14 +825,38 @@ def _id3_text(tags, frame_id: str) -> Optional[str]:
     return None
 
 
+def _id3_genre_text(tags, frame_id: str) -> Optional[str]:
+    """Every value of a multi-value ID3 frame (TCON), comma-joined — unlike
+    _id3_text, which drops every genre past the first. A file tagged with a
+    real multi-value TCON (Picard convention, and what _write_id3 now writes)
+    round-trips through here as the same comma list the DB comparison logic
+    already expects, instead of silently losing everything but genre #1."""
+    frames = tags.getall(frame_id)
+    if frames and frames[0].text:
+        return ', '.join(str(t) for t in frames[0].text if t)
+    return None
+
+
 def _vorbis_first(audio, key: str) -> Optional[str]:
     vals = audio.get(key, [])
     return vals[0] if vals else None
 
 
+def _vorbis_genre_text(audio, key: str) -> Optional[str]:
+    """Every GENRE= entry, comma-joined — see _id3_genre_text."""
+    vals = audio.get(key, [])
+    return ', '.join(str(v) for v in vals if v) if vals else None
+
+
 def _mp4_first(audio, key: str) -> Optional[str]:
     vals = audio.tags.get(key, []) if audio.tags else []
     return str(vals[0]) if vals else None
+
+
+def _mp4_genre_text(audio, key: str) -> Optional[str]:
+    """Every value of the \xa9gen atom, comma-joined — see _id3_genre_text."""
+    vals = audio.tags.get(key, []) if audio.tags else []
+    return ', '.join(str(v) for v in vals if v) if vals else None
 
 
 def _parse_track_num(val) -> Optional[int]:
