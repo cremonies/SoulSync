@@ -547,6 +547,71 @@ def test_search_tracks_structured_query_uses_text_path():
     assert len(tracks) == 1
 
 
+def test_search_tracks_artist_plus_title_searches_title_pinned_to_artist():
+    """Regression: 'Gotye Somebody That I Used To Know' browsed Gotye's
+    discography oldest-first and never showed the song. The words after the
+    artist name must be searched as the recording title, pinned by arid."""
+    client = MusicBrainzSearchClient()
+    client._client = MagicMock()
+    client._client.search_artist.return_value = [_mk_artist('Gotye', 'mb-gotye', score=100)]
+    client._client.search_recording_by_artist_mbid.return_value = [
+        {'id': 'rec-live', 'title': 'Somebody That I Used to Know', 'length': 250000,
+         'artist-credit': [{'name': 'Gotye'}],
+         'releases': [{'id': 'rel-live', 'title': 'Live', 'date': '2012',
+                       'release-group': {'id': 'rg-live', 'primary-type': 'Album',
+                                         'secondary-types': ['Live']}}]},
+        {'id': 'rec-studio', 'title': 'Somebody That I Used to Know', 'length': 244000,
+         'artist-credit': [{'name': 'Gotye'}, {'name': 'Kimbra'}],
+         'releases': [{'id': 'rel-mm', 'title': 'Making Mirrors', 'date': '2011-08-19',
+                       'release-group': {'id': 'rg-mm', 'primary-type': 'Album',
+                                         'secondary-types': []}}]},
+    ]
+
+    tracks = client.search_tracks('Gotye Somebody That I Used To Know', limit=10)
+
+    client._client.search_recording_by_artist_mbid.assert_called_once()
+    args, _ = client._client.search_recording_by_artist_mbid.call_args
+    assert args[0] == 'Somebody That I Used To Know'
+    assert args[1] == 'mb-gotye'
+    client._client.search_recordings_by_artist_mbid.assert_not_called()
+    # Studio recording ranks ahead of the live-only one.
+    assert [t.id for t in tracks] == ['rec-studio', 'rec-live']
+    assert tracks[0].album == 'Making Mirrors'
+
+
+def test_search_tracks_title_then_artist_order_also_pins_artist():
+    client = MusicBrainzSearchClient()
+    client._client = MagicMock()
+    client._client.search_artist.return_value = [_mk_artist('Gotye', 'mb-gotye', score=100)]
+    client._client.search_recording_by_artist_mbid.return_value = [
+        {'id': 'rec-1', 'title': 'Somebody That I Used to Know', 'artist-credit': [{'name': 'Gotye'}]},
+    ]
+
+    tracks = client.search_tracks('Somebody That I Used To Know Gotye', limit=10)
+
+    args, _ = client._client.search_recording_by_artist_mbid.call_args
+    assert args[0] == 'Somebody That I Used To Know'
+    assert [t.id for t in tracks] == ['rec-1']
+
+
+def test_search_tracks_artist_plus_title_falls_back_to_loose_then_free_text():
+    client = MusicBrainzSearchClient()
+    client._client = MagicMock()
+    client._client.search_artist.return_value = [_mk_artist('Gotye', 'mb-gotye', score=100)]
+    client._client.search_recording_by_artist_mbid.return_value = []
+    client._client.search_recording.return_value = []
+
+    tracks = client.search_tracks('Gotye Nothing Like This', limit=10)
+
+    assert tracks == []
+    calls = client._client.search_recording.call_args_list
+    # Loose pinned pass (title + artist), then the whole query as free text.
+    assert calls[0].args[0] == 'Nothing Like This'
+    assert calls[0].kwargs['artist_name'] == 'Gotye'
+    assert calls[1].args[0] == 'Gotye Nothing Like This'
+    client._client.search_recordings_by_artist_mbid.assert_not_called()
+
+
 def test_get_album_resolves_release_group_mbid_to_release():
     """When the album ID is a release-group MBID (from the browse path),
     get_album must look up the release-group, pick a canonical release,
@@ -657,6 +722,11 @@ def test_extract_title_hint_bare_artist_returns_none():
 def test_extract_title_hint_artist_not_prefix_returns_none():
     # Query where the artist name isn't the prefix — nothing to extract.
     assert _extract_title_hint('Abbey Road', 'The Beatles') is None
+
+
+def test_extract_title_hint_artist_suffix():
+    assert _extract_title_hint('Somebody That I Used To Know Gotye', 'Gotye') == \
+        'Somebody That I Used To Know'
 
 
 def test_extract_title_hint_word_boundary_required():

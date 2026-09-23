@@ -653,6 +653,34 @@ def attempt_download_with_candidates(task_id, candidates, track, batch_id=None,
                     except Exception as _pref_err:
                         logger.debug("[Context] preferred-version stamp skipped: %s", _pref_err)
 
+                    # Structured sources (Deezer, Tidal, ...) advertise the exact
+                    # length of the file they serve, and candidate validation
+                    # accepts a few seconds of catalogue drift against the
+                    # metadata source. The integrity check exists to catch a
+                    # broken transfer, so measure the file against the length
+                    # the provider promised. Checking it against the metadata
+                    # source's length would quarantine the copy we just accepted.
+                    # A preview or truncated file still fails against it.
+                    try:
+                        from core.downloads.validation import (
+                            STRICT_DURATION_SOURCES,
+                            duration_drift_exceeds_integrity_tolerance,
+                        )
+                        _adv = getattr(candidate, 'duration', None) or 0
+                        if (
+                            username in STRICT_DURATION_SOURCES
+                            and '_preferred_version_duration_ms' not in matched_downloads_context[context_key]
+                            and duration_drift_exceeds_integrity_tolerance(expected_duration_ms, _adv)
+                        ):
+                            matched_downloads_context[context_key]['_preferred_version_duration_ms'] = int(_adv)
+                            logger.info(
+                                "[Context] %s advertises %.1fs vs expected %.1fs — integrity "
+                                "length checked against the provider's length",
+                                username, _adv / 1000.0, (expected_duration_ms or 0) / 1000.0,
+                            )
+                    except Exception as _adv_err:
+                        logger.debug("[Context] advertised-duration stamp skipped: %s", _adv_err)
+
                     if user_manual_pick:
                         # The user explicitly picked this candidate via the
                         # candidates modal — trust their metadata judgement

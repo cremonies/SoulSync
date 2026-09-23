@@ -100,9 +100,9 @@ def _extract_artist_credit(artist_credit) -> List[str]:
 
 
 def _extract_title_hint(query: str, artist_name: str) -> Optional[str]:
-    """If `query` starts with `artist_name` followed by more words, return
-    the trailing portion. Used to pick out the album/track title the user
-    typed after the artist name (e.g. "The Beatles Abbey Road" → "Abbey
+    """If `query` starts (or ends) with `artist_name` plus more words, return
+    the other portion. Used to pick out the album/track title the user
+    typed next to the artist name (e.g. "The Beatles Abbey Road" → "Abbey
     Road"). Returns None when the query is just the artist name.
 
     Case-insensitive prefix match on whitespace-normalized versions of
@@ -115,9 +115,17 @@ def _extract_title_hint(query: str, artist_name: str) -> Optional[str]:
     a_norm = ' '.join(artist_name.split()).lower()
     if q_norm == a_norm:
         return None
-    # Require a word boundary between the artist name and the trailing bit.
+    # Require a word boundary between the artist name and the title bit.
+    # Match on the normalized strings and cut the ORIGINAL query by word
+    # count, so extra spaces in either one can't shift the slice.
+    q_words = query.split()
+    a_count = len(a_norm.split())
     if q_norm.startswith(a_norm + ' '):
-        return query[len(artist_name):].strip() or None
+        return ' '.join(q_words[a_count:]) or None
+    # "Title Artist" order ("Somebody That I Used To Know Gotye") — the shape
+    # the download worker's fallback queries and many users type.
+    if q_norm.endswith(' ' + a_norm):
+        return ' '.join(q_words[:-a_count]) or None
     return None
 
 
@@ -660,6 +668,22 @@ class MusicBrainzSearchClient:
             if top:
                 mbid = top.get('id', '')
                 tname = top.get('name', '') or query
+
+                # "Gotye Somebody That I Used To Know": the words next to the
+                # artist name are the song. Browsing the discography below
+                # ignores them and returns the artist's OLDEST recordings, so
+                # the song the user typed never shows up. Search for the
+                # title pinned to the artist instead.
+                title_hint = _extract_title_hint(query, tname)
+                if title_hint:
+                    tracks = self._search_artist_title(title_hint, mbid, tname, limit)
+                    if tracks:
+                        return tracks
+                    # The artist resolved, but nothing by them has that title.
+                    # Maybe the "artist" was really part of the title, so
+                    # search the whole query as free text.
+                    return self._search_tracks_text(query, None, limit, strict=False, min_score=20)
+
                 # /recording?artist=<mbid> (browse) rejects inc=releases,
                 # so we use the fielded Lucene search arid:<mbid> instead —
                 # that returns recordings with release context inline.
@@ -721,6 +745,50 @@ class MusicBrainzSearchClient:
         except Exception as e:
             logger.warning(f"MusicBrainz track search failed: {e}")
             return []
+
+    def _search_artist_title(self, title: str, artist_mbid: str, artist_name: str,
+                             limit: int) -> List[Track]:
+        """Find `title` among one artist's recordings.
+
+        The query MusicBrainz documents for "this song by this artist" is a
+        fielded Lucene search on /recording, pinned to the artist by MBID:
+        `arid:<mbid> AND recording:"<title>"`. `arid` matches the artist
+        entity rather than the printed credit text, so aliases and other
+        scripts still match. A bare `/recording?query=<artist title>` only
+        searches the recording-title field, so the artist words there match
+        nothing and just add noise.
+
+        The exact-phrase pass runs first. If it finds nothing (partial
+        title, different punctuation), a loose pass follows: title terms
+        unquoted, artist field-scoped.
+        """
+        recs = self._client.search_recording_by_artist_mbid(
+            title, artist_mbid, limit=max(limit, 25)
+        )
+        if not recs:
+            recs = self._client.search_recording(
+                title, artist_name=artist_name, limit=max(limit, 25), strict=False
+            )
+            recs = [r for r in recs if (r.get('score', 0) or 0) >= 20]
+
+        # Show the studio album for each recording, not a live bootleg or a
+        # compilation. Recordings with a studio release sort first; the sort
+        # is stable, so MusicBrainz's relevance order holds within each group.
+        for r in recs:
+            rels = r.get('releases') or []
+            if rels:
+                rels.sort(key=self._release_preference_key)
+                r['releases'] = rels
+        recs.sort(key=lambda r: 0 if self._has_studio_release(r) else 1)
+
+        tracks = []
+        for r in recs:
+            t = self._recording_to_track(r, artist_name)
+            if t:
+                tracks.append(t)
+            if len(tracks) >= limit:
+                break
+        return tracks
 
     def _search_tracks_text(self, track_name: str, artist_name: Optional[str], limit: int,
                             strict: bool = True, min_score: Optional[int] = None) -> List[Track]:

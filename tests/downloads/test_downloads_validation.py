@@ -118,6 +118,34 @@ def test_rejects_tidal_candidate_that_would_fail_integrity_duration(monkeypatch)
     assert get_valid_candidates([wrong_tidal], expected, 'Artist Song') == []
 
 
+def test_keeps_deezer_candidate_with_small_catalogue_drift(monkeypatch):
+    """Regression: Gotye "Somebody That I Used To Know" is 241s in the
+    metadata source and 245s on Deezer. The pre-download gate used the 3s
+    integrity tolerance and rejected every real copy of the song."""
+    monkeypatch.setattr(validation, 'matching_engine', _MatchingEngine())
+    expected = _Track(duration_ms=241_000)
+    deezer = _Candidate(username='deezer_dl', duration=245_000)
+
+    assert get_valid_candidates([deezer], expected, 'Gotye Somebody') == [deezer]
+
+
+def test_still_rejects_deezer_preview_and_different_cut(monkeypatch):
+    monkeypatch.setattr(validation, 'matching_engine', _MatchingEngine())
+    expected = _Track(duration_ms=241_000)
+    preview = _Candidate(username='deezer_dl', duration=30_000)
+    extended = _Candidate(username='deezer_dl', duration=291_000)
+
+    assert get_valid_candidates([preview, extended], expected, 'Gotye Somebody') == []
+
+
+def test_integrity_drift_helper_flags_catalogue_drift():
+    """Candidates kept inside the wider window but outside the 3s integrity
+    tolerance are the ones candidates.py re-anchors to the provider length."""
+    assert validation.duration_drift_exceeds_integrity_tolerance(241_000, 245_000)
+    assert not validation.duration_drift_exceeds_integrity_tolerance(241_000, 243_000)
+    assert not validation.duration_drift_exceeds_integrity_tolerance(0, 245_000)
+
+
 def test_keeps_tidal_candidate_inside_integrity_duration_tolerance(monkeypatch):
     monkeypatch.setattr(validation, 'matching_engine', _MatchingEngine())
     expected = _Track(duration_ms=338_000)

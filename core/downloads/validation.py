@@ -175,10 +175,47 @@ def _duration_tolerance_seconds(expected_duration_ms):
     return 5.0 if expected_seconds > 600.0 else 3.0
 
 
-def _duration_mismatch_exceeds_integrity_tolerance(expected_duration_ms, candidate_duration_ms):
+# Sources whose search rows carry the provider's exact track length. Their
+# candidates are length-gated before download, and a kept candidate's
+# advertised length becomes the integrity reference (see candidates.py).
+STRICT_DURATION_SOURCES = frozenset({'tidal', 'qobuz', 'hifi', 'deezer_dl', 'amazon'})
+
+# How far a structured source's advertised length may sit from the metadata
+# source's length and still count as the same recording. Two catalogues rarely
+# agree to the second. The same master is often a few seconds apart in
+# Spotify, MusicBrainz and Deezer because of padding, fades or a different
+# release (Gotye "Somebody That I Used To Know": 241s in the metadata, 245s on
+# Deezer). The 3s integrity tolerance measures a TRANSFER against itself, and
+# it rejected every real copy of the song here. This wider window only removes
+# clearly different cuts (previews, extended mixes, radio edits). Title/artist
+# scoring ranks what is left.
+_CANDIDATE_DURATION_MIN_S = 10.0
+_CANDIDATE_DURATION_FRACTION = 0.05
+
+
+def _candidate_duration_tolerance_seconds(expected_duration_ms):
+    expected_seconds = expected_duration_ms / 1000.0
+    return max(
+        _duration_tolerance_seconds(expected_duration_ms),
+        _CANDIDATE_DURATION_MIN_S,
+        expected_seconds * _CANDIDATE_DURATION_FRACTION,
+    )
+
+
+def duration_drift_exceeds_integrity_tolerance(expected_duration_ms, candidate_duration_ms):
+    """True when a file of `candidate_duration_ms` would fail the post-download
+    integrity duration leg measured against `expected_duration_ms`."""
     if not expected_duration_ms or not candidate_duration_ms:
         return False
     tolerance = _duration_tolerance_seconds(expected_duration_ms)
+    drift = abs((candidate_duration_ms / 1000.0) - (expected_duration_ms / 1000.0))
+    return drift > tolerance
+
+
+def _duration_mismatch_exceeds_candidate_tolerance(expected_duration_ms, candidate_duration_ms):
+    if not expected_duration_ms or not candidate_duration_ms:
+        return False
+    tolerance = _candidate_duration_tolerance_seconds(expected_duration_ms)
     drift = abs((candidate_duration_ms / 1000.0) - (expected_duration_ms / 1000.0))
     return drift > tolerance
 
@@ -364,11 +401,10 @@ def _score_streaming_candidates(results, spotify_track):
                               for kw in _version_keywords)
 
     scored = []
-    _strict_duration_sources = {'tidal', 'qobuz', 'hifi', 'deezer_dl', 'amazon'}
     for r in results:
         if (
-            r.username in _strict_duration_sources
-            and _duration_mismatch_exceeds_integrity_tolerance(expected_duration, r.duration or 0)
+            r.username in STRICT_DURATION_SOURCES
+            and _duration_mismatch_exceeds_candidate_tolerance(expected_duration, r.duration or 0)
         ):
             logger.info(
                 "[%s] Rejecting candidate due to duration mismatch before download: "
