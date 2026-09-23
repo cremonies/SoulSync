@@ -390,3 +390,76 @@ def filter_and_rerank(
         t for t in ranked
         if score_track(t, expected_title=expected_title, expected_artist=expected_artist) >= min_score
     ]
+
+
+# ---------------------------------------------------------------------------
+# Free-text reranking (search box, no title/artist split)
+# ---------------------------------------------------------------------------
+
+
+def _word_in(needle: str, haystack: str) -> bool:
+    """Whole-word containment on normalised strings."""
+    if not needle or not haystack:
+        return False
+    return f' {needle} ' in f' {haystack} '
+
+
+def score_track_free_text(track: Track, query: str) -> float:
+    """Relevance of ``track`` to what the user typed in a search box, where
+    we don't know which words are the title and which are the artist.
+
+    - coverage: share of the query's words found in title + artists
+    - +0.5 when the whole title appears in the query
+    - +0.5 when the primary artist appears in the query
+    - cover/karaoke and unrequested variant penalties, same as ``score_track``
+    """
+    q_norm = _normalise(query)
+    q_words = q_norm.split()
+    if not q_words:
+        return 0.0
+
+    title_norm = _normalise(track.name)
+    artist_names = [a.get('name', '') if isinstance(a, dict) else str(a)
+                    for a in (track.artists or [])]
+    cand_words = set(title_norm.split())
+    for name in artist_names:
+        cand_words.update(_normalise(name).split())
+
+    coverage = sum(1 for w in q_words if w in cand_words) / len(q_words)
+    score = coverage
+    if title_norm and _word_in(title_norm, q_norm):
+        score += 0.5
+    if _word_in(_normalise(primary_artist(track)), q_norm):
+        score += 0.5
+
+    if has_cover_pattern(track):
+        score *= COVER_KARAOKE_PENALTY
+    if has_variant_tag(track) and not _contains_pattern(query, VARIANT_TAG_PATTERNS):
+        score *= VARIANT_TAG_PENALTY
+    return score
+
+
+# Popularity only separates results that match the text equally well: a
+# title-only search ("somebody that i used to know") matches the original and
+# every cover the same, and the original is by far the most played.
+FREE_TEXT_POPULARITY_WEIGHT = 0.3
+
+
+def rerank_tracks_free_text(tracks: List[Track], query: str) -> List[Track]:
+    """Return a copy of ``tracks`` sorted by relevance to a free-text query.
+
+    For sources whose own free-text ranking buries the canonical recording
+    under covers and karaoke (Deezer). Text match dominates, the source's
+    popularity (``Track.popularity``) breaks near-ties, and the source's
+    original order is the final tiebreak."""
+    if not tracks or not (query or '').strip():
+        return list(tracks)
+    max_pop = max((getattr(t, 'popularity', 0) or 0) for t in tracks) or 0
+    scored = []
+    for idx, t in enumerate(tracks):
+        score = score_track_free_text(t, query)
+        if max_pop > 0:
+            score += FREE_TEXT_POPULARITY_WEIGHT * ((getattr(t, 'popularity', 0) or 0) / max_pop)
+        scored.append((score, idx, t))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [t for _score, _idx, t in scored]

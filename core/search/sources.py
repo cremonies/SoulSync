@@ -80,7 +80,16 @@ def search_kind(client, query: str, kind: str, source_name: Optional[str] = None
     if kind == "tracks":
         tracks = []
         try:
-            track_objs = client.search_tracks(query, limit=10, **extra)
+            if source_name == "deezer":
+                # Deezer's free-text ranking puts covers and karaoke above the
+                # original. Title-only "somebody that i used to know" had the
+                # real Gotye track 11th, just past the 10 we show. Pull a
+                # bigger pool, rank it locally, keep the top 10.
+                from core.metadata.relevance import rerank_tracks_free_text
+                track_objs = client.search_tracks(query, limit=50, **extra)
+                track_objs = rerank_tracks_free_text(list(track_objs or []), query)[:10]
+            else:
+                track_objs = client.search_tracks(query, limit=10, **extra)
             for track in track_objs:
                 artist_name = ', '.join(track.artists) if track.artists else 'Unknown Artist'
                 tracks.append({

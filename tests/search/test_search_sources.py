@@ -273,3 +273,31 @@ def test_serialized_tracks_carry_real_artists_list():
     out = sources.search_kind(client, 'q', 'tracks', source_name='spotify')
     assert out[0]['artists'] == ['Artist A', 'Artist B']
     assert out[0]['artist'] == 'Artist A, Artist B'   # display string unchanged
+
+
+def test_search_kind_deezer_tracks_fetches_pool_and_reranks():
+    """Deezer tracks: ask for a 50-result pool, rerank locally, return 10."""
+    calls = {}
+
+    class _DeezerClient(_Client):
+        def search_tracks(self, q, limit=10):
+            calls['limit'] = limit
+            pool = [_Track(f'c{i}', 'Somebody That I Used to Know', [f'Cover {i}'])
+                    for i in range(12)]
+            pool.append(_Track('orig', 'Somebody That I Used To Know', ['Gotye']))
+            for t in pool:
+                t.popularity = 900_000 if t.id == 'orig' else 1_000
+            return pool
+
+    result = sources.search_kind(_DeezerClient(), 'gotye somebody that i used to know',
+                                 'tracks', 'deezer')
+
+    assert calls['limit'] == 50
+    assert len(result) == 10
+    assert result[0]['id'] == 'orig'
+
+
+def test_search_kind_non_deezer_tracks_keep_source_order():
+    client = _Client(tracks=[_Track('a', 'A', ['X']), _Track('b', 'B', ['Y'])])
+    result = sources.search_kind(client, 'b y', 'tracks', 'spotify')
+    assert [t['id'] for t in result] == ['a', 'b']

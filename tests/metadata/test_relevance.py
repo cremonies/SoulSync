@@ -480,3 +480,63 @@ def test_combined_query_falls_back_to_legacy():
 def test_combined_query_empty_when_nothing():
     assert _bcsq('', '', '') == ''
     assert _bcsq('   ', '', '  ') == ''
+
+
+# ---------------------------------------------------------------------------
+# Free-text rerank (search box). Deezer order modelled on the user report:
+# the real Gotye recording came 11th, past the 10 results the UI shows.
+# ---------------------------------------------------------------------------
+
+from core.metadata.relevance import rerank_tracks_free_text, score_track_free_text
+from core.metadata.types import Track as _FTTrack
+
+
+def _ft(id_, name, artists, album='', popularity=0, album_type='album'):
+    return _FTTrack(id=id_, name=name, artists=list(artists), album=album,
+                    duration_ms=240000, popularity=popularity, album_type=album_type)
+
+
+def _deezer_like_pool():
+    covers = [
+        _ft(f'c{i}', 'Somebody That I Used to Know', [f'Cover Band {i}'],
+            album='Acoustic Covers', popularity=100_000 + i)
+        for i in range(8)
+    ]
+    karaoke = [
+        _ft('k1', 'Somebody That I Used to Know (Karaoke Version Originally Performed By Gotye)',
+            ['Karaoke Hits'], popularity=50_000),
+        _ft('k2', 'Somebody That I Used to Know (In the Style of Gotye)',
+            ['The Karaoke Channel'], popularity=40_000),
+    ]
+    original = _ft('orig', 'Somebody That I Used To Know', ['Gotye', 'Kimbra'],
+                   album='Making Mirrors', popularity=900_000)
+    return covers + karaoke + [original]
+
+
+def test_free_text_rerank_title_only_surfaces_original_in_top_10():
+    ranked = rerank_tracks_free_text(_deezer_like_pool(), 'somebody that i used to know')
+    assert ranked[0].id == 'orig'
+    assert {'k1', 'k2'}.isdisjoint(t.id for t in ranked[:8])
+
+
+def test_free_text_rerank_artist_plus_title_puts_original_first():
+    ranked = rerank_tracks_free_text(_deezer_like_pool(), 'Gotye Somebody That I Used To Know')
+    assert ranked[0].id == 'orig'
+
+
+def test_free_text_rerank_empty_query_keeps_order():
+    pool = _deezer_like_pool()
+    assert rerank_tracks_free_text(pool, '  ') == pool
+
+
+def test_free_text_score_rewards_artist_named_in_query():
+    orig = _ft('o', 'Somebody That I Used To Know', ['Gotye'])
+    cover = _ft('c', 'Somebody That I Used To Know', ['Someone Else'])
+    q = 'gotye somebody that i used to know'
+    assert score_track_free_text(orig, q) > score_track_free_text(cover, q)
+
+
+def test_free_text_score_keeps_requested_variant():
+    live = _ft('l', 'Somebody That I Used To Know (Live)', ['Gotye'])
+    assert score_track_free_text(live, 'gotye somebody live') > \
+        score_track_free_text(live, 'gotye somebody')
